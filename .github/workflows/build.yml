@@ -1,0 +1,51 @@
+name: Build APK
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-apk
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: gradle/actions/setup-gradle@v6
+
+      - name: Build release APK
+        run: |
+          chmod +x gradlew
+          ./gradlew --no-daemon --stacktrace assembleRelease
+
+      - name: Collect APK
+        run: |
+          cp app/build/outputs/apk/release/app-release.apk jarvis.apk
+          ls -l jarvis.apk
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: jarvis-apk
+          path: jarvis.apk
+
+      - name: Publish release "latest"
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete latest --yes --cleanup-tag || true
+          gh release create latest jarvis.apk \
+            --target "$GITHUB_SHA" \
+            --title "Jarvis (latest build #${GITHUB_RUN_NUMBER})" \
+            --notes "Automatic build ${GITHUB_RUN_NUMBER} from commit ${GITHUB_SHA}. Download jarvis.apk below on your phone and open it to install or update."

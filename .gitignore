@@ -1,0 +1,15 @@
+.gradle/
+build/
+/app/build/
+local.properties
+.idea/
+*.iml
+.DS_Store
+captures/
+.externalNativeBuild/
+.cxx/
+*.apk
+*.aab
+# Never commit API keys or other secrets
+secrets.properties
+.env
