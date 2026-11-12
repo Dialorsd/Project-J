@@ -240,7 +240,7 @@ private fun TimerList() {
                     .border(1.dp, Cyan.copy(alpha = 0.35f), RoundedCornerShape(8.dp)).padding(horizontal = 10.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                val left = if (t.kind == "task") "working…" else Timers.formatDuration(((t.endAt - now) / 1000).coerceAtLeast(0))
+                val left = if (t.kind == "task") "working…" else Timers.formatDuration(((t.endAt - now) / 1000).coerceAtLeast(0L))
                 Text(left, color = Cyan, fontFamily = FontFamily.Monospace, fontSize = 16.sp)
                 Spacer(Modifier.width(10.dp))
                 Text(t.label, color = Color(0xFFDCEBF0), maxLines = 1, modifier = Modifier.weight(1f))
