@@ -28,6 +28,9 @@ object Voice {
     @Volatile private var ttsReady = false
     @Volatile private var track: AudioTrack? = null
     @Volatile private var stopped = false
+    /** v5: true when the last Gemini voice attempt failed for quota (hands-free then uses the phone voice). */
+    @Volatile var lastGeminiQuota = false
+        private set
 
     fun init(context: Context) {
         if (tts != null) return
@@ -42,7 +45,7 @@ object Voice {
     }
 
     /** Speaks [text] and suspends until finished (or failed). Never throws. */
-    suspend fun speak(context: Context, text: String) {
+    suspend fun speak(context: Context, text: String, allowGemini: Boolean = true) {
         val clean = text.replace(Regex("[*_#`]"), "").trim()
         if (clean.isEmpty()) return
         val s = Settings(context)
@@ -51,7 +54,7 @@ object Voice {
         Store.setOrb(OrbState.SPEAKING)
         try {
             var done = false
-            if (s.voiceMode == VoiceMode.GEMINI && !hasCyrillic(clean) && s.geminiKey.isNotBlank()) {
+            if (allowGemini && s.voiceMode == VoiceMode.GEMINI && !hasCyrillic(clean) && s.geminiKey.isNotBlank()) {
                 done = runCatching {
                     val (pcm, rate) = withContext(Dispatchers.IO) { synth(s, s.ttsVoice, s.ttsStyle, clean) }
                     withContext(Dispatchers.IO) { playPcm(pcm, rate) }
@@ -94,6 +97,7 @@ object Voice {
      */
     private fun synth(s: Settings, voice: String, style: String, text: String): Pair<ByteArray, Int> {
         val errors = mutableListOf<String>()
+        lastGeminiQuota = false
         val attempts = listOf<Pair<String, () -> Pair<ByteArray, Int>>>(
             "interactions ${s.ttsModel}" to { interactionsTts(s, s.ttsModel, voice, style, text) },
             "generateContent ${s.ttsModel}" to { legacyTts(s, s.ttsModel, voice, style, text) },
@@ -102,9 +106,10 @@ object Voice {
         for ((name, call) in attempts) {
             if (stopped) break
             try {
-                return call()
+                return call().also { lastGeminiQuota = false }
             } catch (e: BrainException) {
                 errors += "$name: ${e.kind} ${e.message}"
+                if (e.kind == Failure.QUOTA) lastGeminiQuota = true
                 if (e.kind == Failure.BAD_KEY || e.kind == Failure.NETWORK) break
             } catch (e: Exception) {
                 errors += "$name: ${e.message}"

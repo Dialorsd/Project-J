@@ -79,7 +79,9 @@ object LiveSession {
     val status = mutableStateOf("")
     val running = mutableStateOf(false)
     val muted = mutableStateOf(false)
-    @Volatile internal var engine: LiveEngine? = null
+    /** v5: true while the running conversation is the hands-free loop (no Gemini Live). */
+    val handsFree = mutableStateOf(false)
+    @Volatile internal var engine: Conversation? = null
     val active: Boolean get() = engine != null
 
     // ---- v4: interpreter mode (same Live connection, translate-only instruction, no tools) ----
@@ -90,12 +92,17 @@ object LiveSession {
     val heard = mutableStateOf("")
     val translated = mutableStateOf("")
 
-    /** Must be called while an activity of ours is visible (microphone foreground-service rule). */
-    fun start(ctx: Context, interpreter: Boolean = false) {
+    /**
+     * Must be called while an activity of ours is visible (microphone foreground-service rule).
+     * [handsFree]: null = as chosen in Settings (Live mode section).
+     */
+    fun start(ctx: Context, interpreter: Boolean = false, handsFree: Boolean? = null) {
         if (active) return
+        val hf = !interpreter && (handsFree ?: Settings(ctx).handsFreeDefault)
         try {
             ContextCompat.startForegroundService(ctx, Intent(ctx, LiveService::class.java)
-                .putExtra(LiveService.EXTRA_INTERPRETER, interpreter))
+                .putExtra(LiveService.EXTRA_INTERPRETER, interpreter)
+                .putExtra(LiveService.EXTRA_HANDS_FREE, hf))
         } catch (e: Exception) {
             Store.addMessage("note", "Live mode could not start: ${e.javaClass.simpleName}: ${e.message}")
         }
@@ -117,6 +124,7 @@ object LiveSession {
         val e = engine ?: return
         e.muted = !e.muted
         muted.value = e.muted
+        e.onMuteChanged()
     }
 }
 
@@ -125,13 +133,29 @@ class LiveService : Service() {
     companion object {
         const val ACTION_STOP = "com.dialorsd.jarvis.LIVE_STOP"
         const val EXTRA_INTERPRETER = "interpreter"
+        const val EXTRA_HANDS_FREE = "hands_free"
         const val CH_LIVE = "jarvis_live"
         private const val NOTIF_ID = 44
     }
 
-    private var engine: LiveEngine? = null
+    private var engine: Conversation? = null
 
     override fun onBind(intent: Intent?): IBinder? = null
+
+    private fun notification(title: String): android.app.Notification {
+        val open = PendingIntent.getActivity(this, 0, Intent(this, MainActivity::class.java),
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
+        val end = PendingIntent.getService(this, 1, Intent(this, LiveService::class.java).setAction(ACTION_STOP),
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
+        return NotificationCompat.Builder(this, CH_LIVE)
+            .setSmallIcon(R.drawable.ic_stat_jarvis)
+            .setContentTitle(title)
+            .setContentText("Talk freely. Tap End to stop.")
+            .setOngoing(true)
+            .setContentIntent(open)
+            .addAction(R.drawable.ic_stat_jarvis, "End", end)
+            .build()
+    }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent?.action == ACTION_STOP) {
@@ -143,18 +167,13 @@ class LiveService : Service() {
         nm?.createNotificationChannel(NotificationChannel(CH_LIVE, "Live conversation", NotificationManager.IMPORTANCE_LOW).apply {
             description = "Shown while Jarvis is listening in Live mode"
         })
-        val open = PendingIntent.getActivity(this, 0, Intent(this, MainActivity::class.java),
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
-        val end = PendingIntent.getService(this, 1, Intent(this, LiveService::class.java).setAction(ACTION_STOP),
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
-        val n = NotificationCompat.Builder(this, CH_LIVE)
-            .setSmallIcon(R.drawable.ic_stat_jarvis)
-            .setContentTitle(if (intent?.getBooleanExtra(EXTRA_INTERPRETER, false) == true) "Jarvis interpreter is listening" else "Jarvis Live is listening")
-            .setContentText("Talk freely. Tap End to stop.")
-            .setOngoing(true)
-            .setContentIntent(open)
-            .addAction(R.drawable.ic_stat_jarvis, "End", end)
-            .build()
+        val interp = intent?.getBooleanExtra(EXTRA_INTERPRETER, false) == true
+        val hf = !interp && intent?.getBooleanExtra(EXTRA_HANDS_FREE, false) == true
+        val n = notification(when {
+            interp -> "Jarvis interpreter is listening"
+            hf -> "Jarvis hands-free is listening"
+            else -> "Jarvis Live is listening"
+        })
         try {
             ServiceCompat.startForeground(this, NOTIF_ID, n,
                 if (Build.VERSION.SDK_INT >= 30) ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE else 0)
@@ -165,10 +184,11 @@ class LiveService : Service() {
             return START_NOT_STICKY
         }
         if (engine == null) {
-            val interp = intent?.getBooleanExtra(EXTRA_INTERPRETER, false) == true
-            val e = LiveEngine(applicationContext, interp) { stopSelfNow() }
+            val e: Conversation = if (hf) HandsFreeEngine(applicationContext, null) { stopSelfNow() }
+                else LiveEngine(applicationContext, interp, { stopSelfNow() }) { msg -> switchToHandsFree(msg) }
             engine = e
             LiveSession.engine = e
+            LiveSession.handsFree.value = hf
             LiveSession.interpreterOn.value = interp
             if (interp) { LiveSession.heard.value = ""; LiveSession.translated.value = "" }
             LiveSession.running.value = true
@@ -177,6 +197,20 @@ class LiveService : Service() {
             e.begin()
         }
         return START_NOT_STICKY
+    }
+
+    /** v5: every Live model is out of quota: carry on in the same service with the hands-free loop. */
+    private fun switchToHandsFree(message: String) {
+        Store.runOnMain {
+            if (engine == null) return@runOnMain
+            val e = HandsFreeEngine(applicationContext, message) { stopSelfNow() }
+            engine = e
+            LiveSession.engine = e
+            LiveSession.handsFree.value = true
+            LiveSession.muted.value = false
+            runCatching { getSystemService(NotificationManager::class.java)?.notify(NOTIF_ID, notification("Jarvis hands-free is listening")) }
+            e.begin()
+        }
     }
 
     private fun stopSelfNow() {
@@ -190,6 +224,7 @@ class LiveService : Service() {
         LiveSession.engine = null
         LiveSession.running.value = false
         LiveSession.interpreterOn.value = false
+        LiveSession.handsFree.value = false
         LiveSession.status.value = ""
         HeadsetButton.refresh(this)
         super.onDestroy()
@@ -197,19 +232,26 @@ class LiveService : Service() {
 }
 
 /** One Live conversation: WebSocket + microphone + speaker. */
-class LiveEngine(private val ctx: Context, val interpreter: Boolean, private val onEnded: () -> Unit) {
+class LiveEngine(private val ctx: Context, override val interpreter: Boolean, private val onEnded: () -> Unit,
+                 private val onHandOver: ((String) -> Unit)? = null) : Conversation {
+    override val handsFree = false
     private val s = Settings(ctx)
-    private val models = listOf(s.liveModel, s.liveFallbackModel).map { it.trim().removePrefix("models/") }.filter { it.isNotBlank() }.distinct()
+    // v5: ordered rotation list; models out of quota today are left out (Settings → Live mode shows them).
+    private var models = LiveModels.available(s)
     private var modelIndex = 0
     @Volatile private var ws: WebSocket? = null
     @Volatile private var ready = false          // setupComplete received on the current socket
     @Volatile private var everReady = false
+    @Volatile private var modelReady = false     // setupComplete received with the current model
+    @Volatile private var plainSetup = false     // v5: retry without the optional quota-saving setup fields
     @Volatile private var ended = false
     @Volatile private var handle: String? = null // session resumption handle
     @Volatile private var reconnects = 0
-    @Volatile var muted = false
+    @Volatile override var muted = false
     @Volatile private var paused = false         // audio focus lost (phone call...)
     @Volatile private var lastActivity = System.currentTimeMillis()
+    @Volatile private var dropModelAudio = false // v5: he barged in; ignore the rest of this answer
+    private val connectTimes = ArrayDeque<Long>()
     private val userBuf = StringBuilder()
     private val jarvisBuf = StringBuilder()
     private val player = LivePlayer()
@@ -219,22 +261,47 @@ class LiveEngine(private val ctx: Context, val interpreter: Boolean, private val
     private var prevMode = AudioManager.MODE_NORMAL
 
     private fun ukrainian(): Boolean = hasCyrillic(userBuf.toString()) || Store.lastLanguageIsUkrainian()
+    private fun model(): String = models[modelIndex.coerceIn(0, models.size - 1)]
 
-    fun begin() {
+    override fun begin() {
         if (s.geminiKey.isBlank()) { end(Brain.errorLine(BrainException(Failure.NO_KEY, "no key"), ukrainian())); return }
         if (ContextCompat.checkSelfPermission(ctx, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
             end("Live mode needs the microphone permission."); return
         }
+        if (models.isEmpty()) { allSpent(); return }
         Voice.stop()
         LiveSession.status.value = "connecting…"
         Store.setOrb(OrbState.THINKING)
         connect()
     }
 
+    /** Every Live model is out of quota: the interpreter stops, a conversation carries on hands-free. */
+    private fun allSpent() {
+        val uk = ukrainian()
+        if (interpreter || onHandOver == null) {
+            end(if (uk) "Сер, безкоштовний ліміт Live на сьогодні вичерпано для всіх моделей. Він оновиться опівночі за тихоокеанським часом."
+                else "The free Live quota is spent for today on every model, sir. It resets at midnight Pacific time.")
+            return
+        }
+        finish(null, if (uk) "Сер, ліміт Live на сьогодні вичерпано; продовжую в режимі без рук."
+            else "Live quota is spent for today, sir; continuing in hands-free mode.")
+    }
+
     // ---------------------------------------------------------------- socket
 
     private fun connect() {
         if (ended) return
+        // v5: never hammer the server (a reconnect loop after quota errors can get a project blocked).
+        val now = System.currentTimeMillis()
+        synchronized(connectTimes) {
+            while (connectTimes.isNotEmpty() && now - connectTimes.first() > 60_000) connectTimes.removeFirst()
+            if (connectTimes.size >= 6) {
+                Jarvis.scope.launch { end(if (ukrainian()) "Сер, забагато перепідключень за хвилину; зупиняю Live-режим."
+                    else "Too many reconnects in a minute, sir; I've stopped Live mode to be safe.") }
+                return
+            }
+            connectTimes.addLast(now)
+        }
         ready = false
         LiveSession.status.value = if (reconnects > 0) "reconnecting…" else "connecting…"
         ws = Net.client.newWebSocket(Net.liveRequest(s.geminiKey), Listener())
@@ -264,35 +331,30 @@ class LiveEngine(private val ctx: Context, val interpreter: Boolean, private val
         }
     }
 
-    private fun setupMessage(): JSONObject {
-        val model = models[modelIndex.coerceAtMost(models.size - 1)]
-        val gen = JSONObject()
-            .put("responseModalities", JSONArray().put("AUDIO"))
-            .put("speechConfig", JSONObject().put("voiceConfig", JSONObject()
-                .put("prebuiltVoiceConfig", JSONObject().put("voiceName", s.ttsVoice))))
-        val setup = JSONObject()
-            .put("model", "models/$model")
-            .put("generationConfig", gen)
-            .put("systemInstruction", JSONObject().put("parts", JSONArray().put(JSONObject().put("text", systemPrompt()))))
-        if (!interpreter) setup.put("tools", LiveTools.declarations(s))
-        setup
-            .put("inputAudioTranscription", JSONObject())
-            .put("outputAudioTranscription", JSONObject())
-            .put("contextWindowCompression", JSONObject().put("slidingWindow", JSONObject()))
-            .put("sessionResumption", handle?.let { JSONObject().put("handle", it) } ?: JSONObject())
-        return JSONObject().put("setup", setup)
-    }
+    private fun setupMessage(): JSONObject = LiveSetup.build(s, model(), systemPrompt(),
+        if (interpreter) null else LiveTools.declarations(s), plainSetup, handle)
 
     private fun systemPrompt(): String {
         if (interpreter) return Interpreter.instruction(s)
         val c = runCatching { chatContext(ctx, s) }.getOrElse { ChatContext(Store.loadTimers(), null, s.webSearch) }
-        return Brain.character(s) + Brain.memoryBlock() + "\n\n" + Brain.contextBlock(c) + """
+        return Brain.character(s) + Brain.memoryBlock() + "\n\n" + Brain.contextBlock(c) + recap() + """
 
 This is a live, hands-free voice conversation through the phone's loudspeaker. Speak naturally and briefly.
+Keep every answer to 1-3 short spoken sentences unless he explicitly asks for more detail. Do not repeat his question
+back, and do not end with offers of further help.
 Reply in the language the user speaks: if he speaks Ukrainian, you MUST respond unmistakably in Ukrainian; if English, in English.
 To act, call the provided functions (timers, reminders, tasks, memory, notes and lists, calendar, navigation${if (s.webSearch) ", web search" else ""}).
 Call a function only when the user asks for that action, then confirm briefly in one sentence using its result.
 ${Brain.abilityRules()}"""
+    }
+
+    /** v5: a few recent lines as text instead of any audio history (cheap continuity, also across a model switch). */
+    private fun recap(): String {
+        val cutoff = System.currentTimeMillis() - 2 * 3600_000L
+        val recent = Store.messages.toList().filter { (it.role == "user" || it.role == "jarvis") && it.time >= cutoff }.takeLast(6)
+        if (recent.isEmpty()) return ""
+        return "\n\nThe last lines of your conversation with the user, for continuity only (do not repeat or answer them again):\n" +
+            recent.joinToString("\n") { (if (it.role == "user") "User: " else "Jarvis: ") + it.text.replace('\n', ' ').take(200) }
     }
 
     private fun handle(text: String) {
@@ -306,10 +368,11 @@ ${Brain.abilityRules()}"""
         o.optJSONObject("toolCall")?.let { onToolCall(it) }
         o.optJSONObject("goAway")?.let {
             // The connection will be closed soon (about every 10 minutes): reconnect now with the handle.
+            // v5: close the old socket first, so two sessions never count against the free concurrent-session cap.
             if (handle != null) {
                 val old = ws
                 reconnects = 0
-                Jarvis.scope.launch { flushTranscripts(); connect(); old?.close(1000, "goAway") }
+                Jarvis.scope.launch { flushTranscripts(); ws = null; ready = false; old?.close(1000, "goAway"); connect() }
             }
         }
     }
@@ -319,7 +382,10 @@ ${Brain.abilityRules()}"""
         reconnects = 0
         val first = !everReady
         everReady = true
-        LiveSession.status.value = "live · " + models[modelIndex.coerceAtMost(models.size - 1)]
+        val newSession = !modelReady && handle == null
+        modelReady = true
+        if (newSession) LiveUsage.session(s, model())
+        LiveSession.status.value = "live · " + model()
         if (first) {
             Store.addMessage("note", if (interpreter) "Interpreter on: ${Interpreter.name(s.interpA)} ⇄ ${Interpreter.name(s.interpB)}."
                 else if (ukrainian()) "Live-режим увімкнено. Говоріть вільно." else "Live mode on. Speak freely.")
@@ -332,6 +398,7 @@ ${Brain.abilityRules()}"""
         lastActivity = System.currentTimeMillis()
         if (sc.optBoolean("interrupted", false)) {
             player.flush()
+            dropModelAudio = false
             synchronized(this) { if (jarvisBuf.isNotEmpty()) jarvisBuf.append(" …") }
             flushTranscripts()
             Store.setOrb(OrbState.LISTENING)
@@ -352,13 +419,13 @@ ${Brain.abilityRules()}"""
         if (parts != null) for (i in 0 until parts.length()) {
             val d = parts.optJSONObject(i)?.optJSONObject("inlineData") ?: continue
             val data = d.optString("data")
-            if (data.isEmpty() || paused) continue
+            if (data.isEmpty() || paused || dropModelAudio) continue
             val pcm = runCatching { Base64.decode(data, Base64.DEFAULT) }.getOrNull() ?: continue
             val rate = Regex("rate=(\\d+)").find(d.optString("mimeType"))?.groupValues?.get(1)?.toIntOrNull() ?: 24000
             player.enqueue(pcm, rate)
             if (Store.orb.value != OrbState.SPEAKING) Store.setOrb(OrbState.SPEAKING)
         }
-        if (sc.optBoolean("turnComplete", false)) flushTranscripts()
+        if (sc.optBoolean("turnComplete", false)) { flushTranscripts(); dropModelAudio = false }
     }
 
     @Synchronized private fun flushUser() {
@@ -395,12 +462,34 @@ ${Brain.abilityRules()}"""
         }
     }
 
-    fun sendUserText(text: String): Boolean {
+    override fun sendUserText(text: String): Boolean {
         val w = ws ?: return false
         if (!ready) return false
         lastActivity = System.currentTimeMillis()
         synchronized(this) { flushTranscripts() }
         return w.send(JSONObject().put("realtimeInput", JSONObject().put("text", text)).toString())
+    }
+
+    /** v5: try the next model in the list that is not skipped. */
+    private fun nextModel(): Int? {
+        // Re-read: Settings → Retry or another start may have changed the list.
+        for (i in modelIndex + 1 until models.size) if (s.liveSkipReason(models[i]) == null) return i
+        return null
+    }
+
+    private fun switchTo(i: Int, why: String) {
+        val from = model()
+        modelIndex = i
+        handle = null          // a resumption handle belongs to the old model's session
+        modelReady = false
+        plainSetup = false
+        reconnects = 0
+        dropModelAudio = false
+        player.flush()
+        Store.addMessage("note", "Live model $from: $why. Switching to ${model()}.")
+        LiveSession.status.value = "switching to ${model()}…"
+        Store.setOrb(OrbState.THINKING)
+        connect()
     }
 
     private fun closed(code: Int, reason: String, t: Throwable?) {
@@ -411,22 +500,40 @@ ${Brain.abilityRules()}"""
         val detail = LiveErrors.describe(code, reason, t)
         val uk = ukrainian()
         flushTranscripts()
-        // Model refused before the session started: try the backup Live model once.
-        if (!everReady && kind == Failure.MODEL && modelIndex < models.size - 1) {
-            Store.addMessage("note", "Live model ${models[modelIndex]} refused ($detail); trying ${models[modelIndex + 1]}.")
-            modelIndex++
+        val m = model()
+        if (kind == Failure.QUOTA || kind == Failure.MODEL || LiveErrors.isDenied(reason)) LiveUsage.error(s, m, detail)
+        // The whole project was blocked: no model or retry will help, and retrying makes it worse.
+        if (LiveErrors.isDenied(reason)) {
+            end((if (uk) "Сер, Google заблокував доступ цього ключа до Live: " else "Google has denied this key access to Live, sir: ") + detail)
+            return
+        }
+        // v5: the optional quota-saving setup fields were refused before the session started: retry once without them.
+        if (!modelReady && kind == Failure.OTHER && !plainSetup) {
+            plainSetup = true
+            Store.addMessage("note", "Live model $m refused the quota-saving settings ($detail); retrying with the basic setup.")
             connect()
             return
         }
+        // v5: out of quota (at start or mid-session) or model refused: remember it and move to the next free model.
+        if (kind == Failure.QUOTA || kind == Failure.MODEL) {
+            if (kind == Failure.QUOTA) LiveModels.markExhausted(s, m, detail)
+            else if (!modelReady) LiveModels.markRefused(s, m, detail)
+            val next = nextModel()
+            if (next != null) { switchTo(next, if (kind == Failure.QUOTA) "out of quota ($detail)" else "refused ($detail)"); return }
+            val anySpent = s.liveModels.any { s.liveSkipReason(it)?.startsWith("out of quota") == true }
+            if (kind == Failure.QUOTA || anySpent) { allSpent(); return }
+            end(Brain.errorLine(BrainException(kind, detail), uk) + " (Live: $detail)")
+            return
+        }
         when (kind) {
-            Failure.QUOTA, Failure.BAD_KEY, Failure.MODEL, Failure.NO_KEY -> {
+            Failure.BAD_KEY, Failure.NO_KEY -> {
                 end(Brain.errorLine(BrainException(kind, detail), uk) + " (Live: $detail)")
                 return
             }
             else -> {}
         }
         // Something rejected the setup itself: retrying will not help.
-        if (!everReady && kind == Failure.OTHER) {
+        if (!modelReady && kind == Failure.OTHER) {
             end((if (uk) "Сер, Live-режим не запустився: " else "I'm afraid Live mode would not start, sir: ") + detail)
             return
         }
@@ -440,6 +547,7 @@ ${Brain.abilityRules()}"""
                 kotlinx.coroutines.delay(wait)
                 if (!ended) {
                     if (handle == null && everReady) Store.addMessage("note", if (uk) "З'єднання перервалося; починаю нову розмову." else "Connection dropped; starting a fresh Live session.")
+                    if (handle == null) modelReady = false
                     connect()
                 }
             }
@@ -455,12 +563,15 @@ ${Brain.abilityRules()}"""
     }
 
     /** Ends the session. [message] (spoken-style) is added to the chat when not null. */
-    fun end(message: String?) {
+    override fun end(message: String?) = finish(message, null)
+
+    /** [handOver]: instead of ending, hand the service over to hands-free mode, which says this line. */
+    private fun finish(message: String?, handOver: String?) {
         if (ended) return
         ended = true
         flushTranscripts()
         if (message != null) Store.addMessage("jarvis", message)
-        Store.addMessage("note", if (interpreter) "Interpreter off." else if (ukrainian()) "Live-режим вимкнено." else "Live mode ended.")
+        if (handOver == null) Store.addMessage("note", if (interpreter) "Interpreter off." else if (ukrainian()) "Live-режим вимкнено." else "Live mode ended.")
         runCatching { ws?.close(1000, "bye") }
         ws = null
         recThread?.interrupt()
@@ -468,7 +579,7 @@ ${Brain.abilityRules()}"""
         releaseAudioRouting()
         Store.setOrb(OrbState.IDLE)
         LiveSession.status.value = ""
-        onEnded()
+        if (handOver != null && onHandOver != null) onHandOver.invoke(handOver) else onEnded()
     }
 
     // ---------------------------------------------------------------- audio
@@ -524,6 +635,11 @@ ${Brain.abilityRules()}"""
         focus?.let { f -> runCatching { a.abandonAudioFocusRequest(f) } }
     }
 
+    private fun sendAudio(bytes: ByteArray, len: Int = bytes.size) {
+        val b64 = Base64.encodeToString(bytes, 0, len, Base64.NO_WRAP)
+        ws?.send("{\"realtimeInput\":{\"audio\":{\"data\":\"$b64\",\"mimeType\":\"audio/pcm;rate=16000\"}}}")
+    }
+
     @SuppressLint("MissingPermission")
     private fun recordLoop() {
         val rate = 16000
@@ -545,6 +661,14 @@ ${Brain.abilityRules()}"""
         runCatching { if (AutomaticGainControl.isAvailable()) AutomaticGainControl.create(rec.audioSessionId)?.let { it.enabled = true; effects += it } }
         val buf = ByteArray(chunk)
         var sending = true
+        // v5 quota saver: hybrid VAD (docs: live-api/capabilities). The on-device gate streams only his speech
+        // (with 300 ms pre-roll) and sends audioStreamEnd when he stops; Google's own VAD still decides the turns.
+        val gate = VoiceGate(rate, sensitivity = s.liveGateSensitivity)
+        val gateOn = s.liveQuotaSaver
+        var streaming = false
+        var sentBytes = 0L
+        var lastFlush = System.currentTimeMillis()
+        val idleMs = s.liveIdleMinutes * 60_000L
         try {
             rec.startRecording()
             while (!ended && !Thread.currentThread().isInterrupted) {
@@ -557,19 +681,47 @@ ${Brain.abilityRules()}"""
                 if (n <= 0) { Thread.sleep(20); continue }
                 val speaking = player.speaking()
                 if (Store.orb.value == OrbState.SPEAKING && !speaking) Store.setOrb(OrbState.LISTENING)
-                // Echo guard: without barge-in, the mic is not sent while he speaks.
-                val send = ready && !muted && !paused && (s.liveBargeIn || !speaking)
-                if (send) {
-                    val b64 = Base64.encodeToString(buf, 0, n, Base64.NO_WRAP)
-                    ws?.send("{\"realtimeInput\":{\"audio\":{\"data\":\"$b64\",\"mimeType\":\"audio/pcm;rate=16000\"}}}")
-                } else if (sending && ready) {
-                    ws?.send("{\"realtimeInput\":{\"audioStreamEnd\":true}}")
+                if (!gateOn) {
+                    // Always stream (the v4 behaviour). Echo guard: without barge-in, the mic is not sent while he speaks.
+                    val send = ready && !muted && !paused && (s.liveBargeIn || !speaking)
+                    if (send) {
+                        sendAudio(buf, n); sentBytes += n
+                    } else if (sending && ready) {
+                        ws?.send("{\"realtimeInput\":{\"audioStreamEnd\":true}}")
+                    }
+                    sending = send
+                } else if (!ready || muted || paused || (speaking && !s.liveBargeIn)) {
+                    if (streaming && ready) ws?.send("{\"realtimeInput\":{\"audioStreamEnd\":true}}")
+                    streaming = false
+                    gate.reset()
+                } else {
+                    gate.echoMode = speaking
+                    val out = gate.process(buf, n)
+                    if (out.event == VoiceGate.Event.OPENED) {
+                        lastActivity = System.currentTimeMillis()
+                        if (speaking) {
+                            // Barge-in: stop him at once; the server confirms with "interrupted".
+                            player.flush()
+                            dropModelAudio = true
+                            Store.setOrb(OrbState.LISTENING)
+                        }
+                    }
+                    out.send?.let { sendAudio(it); sentBytes += it.size; streaming = true }
+                    if (out.event == VoiceGate.Event.CLOSED) {
+                        ws?.send("{\"realtimeInput\":{\"audioStreamEnd\":true}}")
+                        streaming = false
+                    }
                 }
-                sending = send
                 if (speaking) lastActivity = System.currentTimeMillis()
-                // Battery: end a forgotten session after 10 minutes with nothing said by either side.
-                if (System.currentTimeMillis() - lastActivity > 10 * 60_000L) {
-                    Jarvis.scope.launch { end(if (ukrainian()) "Тиша вже десять хвилин, сер; вимикаю Live-режим." else "Ten minutes of silence, sir; I've ended Live mode to save the battery.") }
+                val now = System.currentTimeMillis()
+                if (now - lastFlush >= 10_000) {
+                    LiveUsage.addTime(s, sentBytes * 1000 / (rate * 2), now - lastFlush)
+                    sentBytes = 0; lastFlush = now
+                }
+                // Battery and quota: end a forgotten session after N minutes with nothing said by either side.
+                if (now - lastActivity > idleMs) {
+                    val m = s.liveIdleMinutes
+                    Jarvis.scope.launch { end(if (ukrainian()) "Тиша вже $m хв, сер; вимикаю Live-режим." else "$m minutes of silence, sir; I've ended Live mode to save the quota.") }
                     break
                 }
             }
@@ -577,6 +729,7 @@ ${Brain.abilityRules()}"""
         } catch (e: Exception) {
             if (!ended) Jarvis.scope.launch { end("Microphone error: ${e.message}") }
         } finally {
+            runCatching { LiveUsage.addTime(s, sentBytes * 1000 / (rate * 2), System.currentTimeMillis() - lastFlush) }
             runCatching { rec.stop() }
             effects.forEach { runCatching { it.release() } }
             rec.release()
@@ -749,11 +902,23 @@ object LiveErrors {
             isTimeLimit(r) -> Failure.SERVER // "deadline exceeded" is not a quota problem
             code == 429 || "quota" in r || "resource_exhausted" in r || "resource exhausted" in r || "rate limit" in r || "exceeded" in r -> Failure.QUOTA
             code == 401 || code == 403 || "api key" in r || "api_key" in r || "unauthenticated" in r || "permission denied" in r -> Failure.BAD_KEY
+            "new users" in r || "no longer available" in r -> Failure.MODEL
             code == 404 || "not found" in r || "is not supported" in r || "unsupported model" in r || "model" in r && "not" in r -> Failure.MODEL
             code == 1007 || code == 1008 || code == 400 -> Failure.OTHER
             t is IOException -> Failure.NETWORK
             else -> Failure.SERVER
         }
+    }
+
+    /** "Your project has been denied access" (1008): project-level block; retrying makes it worse. */
+    fun isDenied(reason: String): Boolean = "denied access" in reason.lowercase()
+
+    /** Diagnostics label for a probe / close result. */
+    fun label(code: Int, reason: String): String = when (classify(code, reason, null)) {
+        Failure.QUOTA -> "QUOTA"
+        Failure.MODEL -> "MODEL REFUSED"
+        Failure.BAD_KEY -> "KEY REFUSED"
+        else -> if (isDenied(reason)) "PROJECT DENIED" else "ERROR"
     }
 
     fun isTimeLimit(reason: String): Boolean {
@@ -765,19 +930,19 @@ object LiveErrors {
         listOfNotNull(if (code >= 0) "code $code" else null, reason.takeIf { it.isNotBlank() },
             t?.let { "${it.javaClass.simpleName}: ${it.message}" }).joinToString(", ").ifBlank { "unknown" }.take(300)
 
-    /** Diagnostics: open a socket, send a minimal setup, wait for setupComplete. Returns null if OK. Blocking. */
+    /**
+     * Diagnostics: open a socket, send the same setup a conversation uses (without the long prompt), wait for
+     * setupComplete. Returns null if OK, else the close code and Google's reason text. A quota answer marks the
+     * model as out of quota for today. Blocking.
+     */
     fun probe(s: Settings, model: String): String? {
         if (s.geminiKey.isBlank()) return "No Gemini API key saved."
         val latch = CountDownLatch(1)
         var result: String? = "timed out after 20 s without setupComplete"
+        var quota = false
         val ws = Net.client.newWebSocket(Net.liveRequest(s.geminiKey), object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
-                val setup = JSONObject().put("setup", JSONObject().put("model", "models/" + model.removePrefix("models/"))
-                    .put("generationConfig", JSONObject().put("responseModalities", JSONArray().put("AUDIO"))
-                        .put("speechConfig", JSONObject().put("voiceConfig", JSONObject()
-                            .put("prebuiltVoiceConfig", JSONObject().put("voiceName", s.ttsVoice)))))
-                    .put("tools", LiveTools.declarations(s)))
-                webSocket.send(setup.toString())
+                webSocket.send(LiveSetup.build(s, model, null, LiveTools.declarations(s), plain = false, handle = null).toString())
             }
             fun msg(text: String) {
                 if (text.contains("setupComplete")) { result = null; latch.countDown() }
@@ -785,7 +950,10 @@ object LiveErrors {
             override fun onMessage(webSocket: WebSocket, text: String) = msg(text)
             override fun onMessage(webSocket: WebSocket, bytes: ByteString) = msg(bytes.utf8())
             override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
-                if (latch.count > 0) { result = "closed: " + describe(code, reason, null); latch.countDown() }
+                if (latch.count > 0) {
+                    quota = classify(code, reason, null) == Failure.QUOTA
+                    result = "${label(code, reason)}: closed with " + describe(code, reason, null); latch.countDown()
+                }
             }
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
                 if (latch.count > 0) { result = "failed: " + describe(response?.code ?: -1, response?.message ?: "", t); latch.countDown() }
@@ -793,6 +961,42 @@ object LiveErrors {
         })
         latch.await(20, TimeUnit.SECONDS)
         ws.close(1000, "probe done")
+        result?.let { r ->
+            if (quota) { LiveModels.markExhausted(s, model, r); LiveUsage.error(s, model, r) }
+        }
         return result
+    }
+}
+
+/** v5: the Live setup message, shared by conversations and the Diagnostics probe. */
+object LiveSetup {
+    /**
+     * Thinking (ai.google.dev/gemini-api/docs/live-api/capabilities): 3.8 Live does not accept thinkingLevel (it must be
+     * omitted); 3.1 Flash Live defaults to "minimal" already; the extended-thinking model's lowest level is "low".
+     */
+    fun thinkingLevel(model: String): String? = if ("extended-thinking" in model) "low" else null
+
+    /** [plain]: the v4 setup shape (no thinking / compression limits), used if a model refuses the extra fields. */
+    fun build(s: Settings, model: String, system: String?, tools: JSONArray?, plain: Boolean, handle: String?): JSONObject {
+        val gen = JSONObject()
+            .put("responseModalities", JSONArray().put("AUDIO"))
+            .put("speechConfig", JSONObject().put("voiceConfig", JSONObject()
+                .put("prebuiltVoiceConfig", JSONObject().put("voiceName", s.ttsVoice))))
+        if (!plain) thinkingLevel(model)?.let { gen.put("thinkingConfig", JSONObject().put("thinkingLevel", it)) }
+        val setup = JSONObject()
+            .put("model", "models/$model")
+            .put("generationConfig", gen)
+        if (system != null) setup.put("systemInstruction", JSONObject().put("parts", JSONArray().put(JSONObject().put("text", system))))
+        if (tools != null) setup.put("tools", tools)
+        // Small context window: every turn re-reads the whole context (audio is ~25 tokens a second).
+        val compression = if (plain) JSONObject().put("slidingWindow", JSONObject())
+            else JSONObject().put("triggerTokens", Defaults.LIVE_TRIGGER_TOKENS)
+                .put("slidingWindow", JSONObject().put("targetTokens", Defaults.LIVE_TARGET_TOKENS))
+        setup
+            .put("inputAudioTranscription", JSONObject())
+            .put("outputAudioTranscription", JSONObject())
+            .put("contextWindowCompression", compression)
+            .put("sessionResumption", handle?.let { JSONObject().put("handle", it) } ?: JSONObject())
+        return JSONObject().put("setup", setup)
     }
 }

@@ -81,4 +81,14 @@ dependencies {
     implementation("com.squareup.okhttp3:okhttp:5.3.1")
     // v4: periodic web page watchers and the wrap-up job (developer.android.com/jetpack/androidx/releases/work, 2.12.0 stable).
     implementation("androidx.work:work-runtime:2.12.0")
+    // v5: JVM unit tests for the pure voice-gate logic (VoiceGate.kt).
+    testImplementation("junit:junit:4.13.2")
+}
+
+// Show each unit test result in the CI log.
+tasks.withType<Test>().configureEach {
+    testLogging {
+        events("passed", "failed", "skipped")
+        exceptionFormat = org.gradle.api.tasks.testing.logging.TestExceptionFormat.FULL
+    }
 }

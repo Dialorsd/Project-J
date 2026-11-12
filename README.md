@@ -118,10 +118,24 @@ Keys are stored only on the phone, in the app's private storage. They are never 
 1. Tap **LIVE CONVERSATION** under the orb (allow the microphone if asked).
 2. Talk normally. The orb shows LISTENING, THINKING (doing something, e.g. setting a timer) or SPEAKING.
    Speak over him to interrupt. Both sides of the conversation are written into the chat.
-3. **MUTE** pauses the microphone, **END** (or End in the notification) stops. He also stops after 10 silent minutes.
+3. **MUTE** pauses the microphone, **END** (or End in the notification) stops. He also stops after 3 silent minutes
+   (Settings → Live mode).
 
 If he keeps interrupting himself on the loudspeaker, turn off Settings → Live mode → "Allow interrupting him",
 or use headphones. If Live mode cannot start, the normal mic button still works exactly as before.
+
+### Live quota, the quota saver and hands-free mode
+
+Google's free Live quota is counted in tokens: every second of audio sent to Google counts (roughly 25 tokens a
+second, silence included), and each answer re-reads the conversation so far. So Jarvis now (1) sends your microphone
+only while you are actually speaking ("Save Live quota", on by default; a small on-device voice detector with a
+sensitivity slider; turn it off to always stream if he misses your words), (2) keeps the conversation memory small and
+asks for short answers, (3) when a Live model runs out of quota, moves on to the next free Live model in the list
+(Settings → Live mode, editable) and skips the spent one until the daily reset at midnight Pacific time (**RETRY NOW**
+to try it earlier), and (4) when every Live model is spent, says so and carries on in **hands-free mode**: the phone's
+own speech recognition, the normal text brain (Groq first by default, to save the Gemini quota) and the normal voice,
+in a loop, in the same notification with End. Hands-free can also be chosen as the main mode in Settings → Live mode.
+Settings → Live mode shows today's audio sent, sessions, model status and the last quota error with **COPY**.
 
 ### Quick access
 
@@ -172,7 +186,7 @@ developer.
 ## Battery
 
 - **Live mode**: uses the microphone and the network continuously, but only while it is running (notification
-  shown). Expect roughly the drain of a phone call. It ends itself after 10 silent minutes.
+  shown). Expect roughly the drain of a phone call. It ends itself after 3 silent minutes (adjustable).
 - **Morning call, timers, reminders, event heads-ups**: alarms only (no background loops). The event heads-up
   wakes the phone at most once per event plus a check every 6 hours.
 - **Low battery warning** (off by default): a system broadcast while the app is in memory, plus a half-hourly
@@ -188,9 +202,10 @@ developer.
 ## Known limits
 
 - No wake word ("Hey Jarvis"): start Live mode or tap the mic.
-- Live mode uses Google's free Live models (currently `gemini-3.8-live`, backup `gemini-3.1-flash-live-preview`;
-  editable under Settings → Advanced). Free-tier limits are not published per model; when they are used up
-  Jarvis says so and the normal mic button still works. Long Live sessions reconnect every ~10 minutes
+- Live mode uses Google's free Live models in turn (`gemini-3.8-live`, `gemini-3.1-flash-live-preview`,
+  `gemini-3.8-live-extended-thinking`, then the older `gemini-2.5-flash-native-audio-preview-12-2025` if your key still
+  has it; editable under Settings → Live mode). Google does not publish the free Live limits per model; when all are
+  used up Jarvis continues in hands-free mode. Long Live sessions reconnect every ~10 minutes
   (Google's connection limit) and resume the conversation; if resuming fails a fresh session starts.
 - In Live mode, timers, notes, calendar and so on are done through the same actions as in normal mode; background
   tasks still call you when they finish.

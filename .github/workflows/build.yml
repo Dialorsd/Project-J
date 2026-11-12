@@ -25,6 +25,11 @@ jobs:
 
       - uses: gradle/actions/setup-gradle@v6
 
+      - name: Unit tests (voice gate)
+        run: |
+          chmod +x gradlew
+          ./gradlew --no-daemon --stacktrace testStandardDebugUnitTest
+
       - name: Build release APKs (standard + full)
         run: |
           chmod +x gradlew

@@ -42,7 +42,22 @@ object Defaults {
     // 3.1 Flash Live Preview is the documented "legacy preview" and is tried if the first is refused.
     const val LIVE_MODEL = "gemini-3.8-live"
     const val LIVE_FALLBACK_MODEL = "gemini-3.1-flash-live-preview"
-    const val LIVE_WS = "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent"
+    /**
+     * Default rotation when a Live model reports quota exhaustion (pricing page, checked 2026-11-12: 3.8 Live,
+     * 3.1 Flash Live Preview and 3.8 Live Extended Thinking are "Free of charge"; the 2.5 native-audio preview is
+     * no longer listed and is tried last, skipped for good if Google says it is not available to new users).
+     * 3.5 Live Translate / Transcribe Live are also free but are not conversation models.
+     */
+    val LIVE_MODELS = listOf(LIVE_MODEL, LIVE_FALLBACK_MODEL, "gemini-3.8-live-extended-thinking",
+        "gemini-2.5-flash-native-audio-preview-12-2025")
+    /**
+     * Context window compression (ai.google.dev/gemini-api/docs/live-api/session-management): compress once the
+     * context reaches this many tokens, down to LIVE_TARGET_TOKENS. Every turn re-reads the whole context, so a
+     * small window keeps each turn cheap. Audio is roughly 25 tokens per second (inferred from the per-minute prices).
+     */
+    const val LIVE_TRIGGER_TOKENS = 12000
+    const val LIVE_TARGET_TOKENS = 6000
+    const val LIVE_WS ="wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent"
 
     // Open-Meteo (free, no key, non-commercial use, CC BY 4.0 data).
     const val GEOCODE_URL = "https://geocoding-api.open-meteo.com/v1/search"
@@ -163,6 +178,68 @@ class Settings(context: Context) {
     var liveGrounding: Boolean
         get() = p.getBoolean("live_grounding", false)
         set(v) = p.edit().putBoolean("live_grounding", v).apply()
+
+    // ---- v5: Live quota saving ----
+    /** Only stream the microphone while he is speaking (on-device voice gate). */
+    var liveQuotaSaver: Boolean
+        get() = p.getBoolean("live_quota_saver", true)
+        set(v) = p.edit().putBoolean("live_quota_saver", v).apply()
+    /** Voice gate sensitivity 0..1. */
+    var liveGateSensitivity: Float
+        get() = p.getFloat("live_gate_sens", 0.5f)
+        set(v) = p.edit().putFloat("live_gate_sens", v.coerceIn(0f, 1f)).apply()
+    /** Minutes of silence before Live / hands-free ends itself. */
+    var liveIdleMinutes: Int
+        get() = p.getInt("live_idle_min", 3)
+        set(v) = p.edit().putInt("live_idle_min", v.coerceIn(1, 60)).apply()
+    /** The LIVE CONVERSATION button starts hands-free mode instead of Gemini Live. */
+    var handsFreeDefault: Boolean
+        get() = p.getBoolean("hands_free_default", false)
+        set(v) = p.edit().putBoolean("hands_free_default", v).apply()
+    /** Hands-free mode asks Groq first to save Gemini quota. */
+    var handsFreePreferGroq: Boolean
+        get() = p.getBoolean("hands_free_groq", true)
+        set(v) = p.edit().putBoolean("hands_free_groq", v).apply()
+    /** Mute the recognizer's start beep in hands-free mode. */
+    var handsFreeQuietBeep: Boolean
+        get() = p.getBoolean("hands_free_quiet_beep", true)
+        set(v) = p.edit().putBoolean("hands_free_quiet_beep", v).apply()
+
+    /** Ordered Live models. Until edited, built from the older two fields plus the documented free models. */
+    var liveModels: List<String>
+        get() = (p.getString("live_models", null)?.lines()
+            ?: (listOf(liveModel, liveFallbackModel) + Defaults.LIVE_MODELS))
+            .map { it.trim().removePrefix("models/") }.filter { it.isNotBlank() }.distinct()
+        set(v) {
+            val l = v.map { it.trim().removePrefix("models/") }.filter { it.isNotBlank() }.distinct()
+            p.edit().putString("live_models", l.joinToString("\n"))
+                .putString("live_model", l.getOrElse(0) { Defaults.LIVE_MODEL })
+                .putString("live_fallback_model", l.getOrElse(1) { "" }).apply()
+        }
+
+    // Live models out of quota: JSON {model: {"until": ms, "why": text, "at": ms}}. until = Long.MAX_VALUE = until RETRY.
+    private fun liveSkipped(): org.json.JSONObject = runCatching { org.json.JSONObject(p.getString("live_skip", "{}")!!) }
+        .getOrDefault(org.json.JSONObject())
+    /** Why the model is skipped right now, or null if it may be tried. */
+    fun liveSkipReason(model: String): String? {
+        val o = liveSkipped().optJSONObject(model) ?: return null
+        if (System.currentTimeMillis() >= o.optLong("until")) return null
+        return o.optString("why").ifBlank { "out of quota" }
+    }
+    fun liveSkipUntil(model: String): Long = liveSkipped().optJSONObject(model)?.optLong("until") ?: 0L
+    fun skipLiveModel(model: String, why: String, until: Long) {
+        val all = liveSkipped()
+        all.put(model, org.json.JSONObject().put("until", until).put("why", why.take(200)).put("at", System.currentTimeMillis()))
+        p.edit().putString("live_skip", all.toString()).apply()
+    }
+    fun unskipLiveModel(model: String) {
+        val all = liveSkipped(); all.remove(model); p.edit().putString("live_skip", all.toString()).apply()
+    }
+
+    /** Today's Live usage (Pacific-time quota day): JSON, see [LiveUsage]. */
+    var liveUsage: String
+        get() = p.getString("live_usage", "{}") ?: "{}"
+        set(v) = p.edit().putString("live_usage", v).apply()
 
     // ---- v3: morning call ----
     var morningOn: Boolean

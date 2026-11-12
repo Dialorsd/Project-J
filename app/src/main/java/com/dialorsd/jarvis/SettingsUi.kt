@@ -136,8 +136,13 @@ private fun SettingsMain(settings: Settings, resumeTick: Int, close: () -> Unit,
     var topic by remember { mutableStateOf(settings.ntfyTopic) }
     var server by remember { mutableStateOf(settings.ntfyServer) }
     // v3
-    var liveModel by remember { mutableStateOf(settings.liveModel) }
-    var liveFallback by remember { mutableStateOf(settings.liveFallbackModel) }
+    var liveModels by remember { mutableStateOf(settings.liveModels.joinToString("\n")) }
+    var quotaSaver by remember { mutableStateOf(settings.liveQuotaSaver) }
+    var gateSens by remember { mutableStateOf(settings.liveGateSensitivity) }
+    var idleMin by remember { mutableStateOf(settings.liveIdleMinutes.toString()) }
+    var handsFreeDefault by remember { mutableStateOf(settings.handsFreeDefault) }
+    var preferGroq by remember { mutableStateOf(settings.handsFreePreferGroq) }
+    var quietBeep by remember { mutableStateOf(settings.handsFreeQuietBeep) }
     var bargeIn by remember { mutableStateOf(settings.liveBargeIn) }
     var grounding by remember { mutableStateOf(settings.liveGrounding) }
     var morningOn by remember { mutableStateOf(settings.morningOn) }
@@ -177,7 +182,14 @@ private fun SettingsMain(settings: Settings, resumeTick: Int, close: () -> Unit,
         settings.speechLang = lang; settings.voiceMode = mode; settings.humour = humour
         settings.ntfyServer = server
         if (topic.isNotBlank()) settings.ntfyTopic = topic
-        settings.liveModel = liveModel; settings.liveFallbackModel = liveFallback
+        val newList = liveModels.lines().map { it.trim().removePrefix("models/") }.filter { it.isNotBlank() }
+        // A model added or renamed gets a fresh chance.
+        newList.filter { it !in settings.liveModels }.forEach { settings.unskipLiveModel(it) }
+        if (newList.isNotEmpty()) settings.liveModels = newList
+        settings.liveQuotaSaver = quotaSaver; settings.liveGateSensitivity = gateSens
+        idleMin.toIntOrNull()?.let { settings.liveIdleMinutes = it }
+        settings.handsFreeDefault = handsFreeDefault; settings.handsFreePreferGroq = preferGroq
+        settings.handsFreeQuietBeep = quietBeep
         settings.liveBargeIn = bargeIn; settings.liveGrounding = grounding
         settings.morningOn = morningOn; settings.morningDays = morningDays
         parseTime(morningTime)?.let { settings.morningTime = it }
@@ -282,12 +294,39 @@ private fun SettingsMain(settings: Settings, resumeTick: Int, close: () -> Unit,
         SectionHeader("LIVE MODE", isOpen("LIVE")) { toggle("LIVE") }
         if (isOpen("LIVE")) {
             Hint("A hands-free conversation: tap LIVE CONVERSATION on the main screen and just talk. It uses the microphone " +
-                "and internet only while it runs (a notification with End is shown) and ends itself after 10 silent minutes.")
+                "and internet only while it runs (a notification with End is shown) and ends itself after the silent minutes below.")
+            Text("The LIVE CONVERSATION button starts", color = Dim)
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                FilterChip(!handsFreeDefault, { handsFreeDefault = false }, label = { Text("Gemini Live") })
+                FilterChip(handsFreeDefault, { handsFreeDefault = true }, label = { Text("Hands-free") })
+            }
+            Hint("Gemini Live: natural realtime voice, uses Google's free Live quota. Hands-free: the phone's speech recognition, " +
+                "the text brain and the normal voice in a loop; slower, but no Live quota. Jarvis switches to hands-free by himself " +
+                "when every Live model is out of quota.")
+            SwitchRow("Save Live quota (send audio only when I speak)", "Off = always stream the microphone, as before. " +
+                "Turn off if Jarvis misses the start of what you say or does not hear you.", quotaSaver) { quotaSaver = it }
+            if (quotaSaver) {
+                Text("Voice detection sensitivity: " + when {
+                    gateSens < 0.25f -> "low (loud rooms)"; gateSens < 0.6f -> "normal"; gateSens < 0.85f -> "high"; else -> "very high (quiet voice)"
+                }, color = Dim)
+                Slider(gateSens, { gateSens = it })
+            }
+            NumberField(idleMin, { idleMin = it }, "End after this many silent minutes", Modifier.fillMaxWidth())
             SwitchRow("Allow interrupting him", "Speak over Jarvis to stop him. Turn off if he keeps interrupting himself " +
                 "on the loudspeaker (poor echo cancellation); then the mic pauses while he talks.", bargeIn) { bargeIn = it }
             SwitchRow("Google Search inside Live", "Off: web lookups go through the separate search helper (recommended: Gemini, Groq, Wikipedia in turn). " +
                 "On: the Live model searches by itself. Google lists this as free for Live models, so it may be worth trying.", grounding) { grounding = it }
-            Hint("Live model names are under ADVANCED.")
+            OutlinedTextField(liveModels, { liveModels = it }, Modifier.fillMaxWidth(), label = { Text("Live models, one per line, tried in order") },
+                minLines = 2, maxLines = 6)
+            Hint("When a model runs out of free quota, Jarvis moves to the next one (also in the middle of a conversation) and skips it " +
+                "until the daily reset at midnight Pacific time (${java.text.SimpleDateFormat("HH:mm", java.util.Locale.getDefault())
+                    .format(java.util.Date(QuotaClock.nextPacificMidnight(System.currentTimeMillis())))} on this phone).")
+            LiveStatusPanel(settings)
+            Text("Hands-free mode", color = Dim)
+            SwitchRow("Prefer Groq for hands-free", "Ask Groq first (free) and Gemini only if Groq fails, to save the Gemini quota. " +
+                "Needs the Groq key.", preferGroq) { preferGroq = it }
+            SwitchRow("Silence the listening beep", "Mutes the phone's beep each time hands-free starts listening " +
+                "(media and notification sound are muted for half a second).", quietBeep) { quietBeep = it }
         }
 
         // ---------------------------------------------------------------- WEB SEARCH
@@ -449,8 +488,7 @@ private fun SettingsMain(settings: Settings, resumeTick: Int, close: () -> Unit,
             Hint("Change only if a model is renamed or retired.")
             OutlinedTextField(model, { model = it }, Modifier.fillMaxWidth(), label = { Text("Gemini model") }, singleLine = true)
             OutlinedTextField(fallback, { fallback = it }, Modifier.fillMaxWidth(), label = { Text("Gemini backup model (blank = none)") }, singleLine = true)
-            OutlinedTextField(liveModel, { liveModel = it }, Modifier.fillMaxWidth(), label = { Text("Live model") }, singleLine = true)
-            OutlinedTextField(liveFallback, { liveFallback = it }, Modifier.fillMaxWidth(), label = { Text("Live backup model (blank = none)") }, singleLine = true)
+            Hint("Live model names are under LIVE MODE.")
             OutlinedTextField(searchModel, { searchModel = it }, Modifier.fillMaxWidth(), label = { Text("Web search model") }, singleLine = true)
             OutlinedTextField(tts, { tts = it }, Modifier.fillMaxWidth(), label = { Text("Gemini voice model") }, singleLine = true)
             OutlinedTextField(voice, { voice = it }, Modifier.fillMaxWidth(), label = { Text("Gemini voice name") }, singleLine = true)
@@ -458,7 +496,7 @@ private fun SettingsMain(settings: Settings, resumeTick: Int, close: () -> Unit,
             TextButton(onClick = {
                 model = Defaults.GEMINI_MODEL; fallback = Defaults.GEMINI_FALLBACK_MODEL; tts = Defaults.GEMINI_TTS_MODEL
                 voice = Defaults.GEMINI_TTS_VOICE; groqModel = Defaults.GROQ_MODEL; searchModel = Defaults.SEARCH_MODEL
-                style = Defaults.TTS_STYLE; liveModel = Defaults.LIVE_MODEL; liveFallback = Defaults.LIVE_FALLBACK_MODEL
+                style = Defaults.TTS_STYLE; liveModels = Defaults.LIVE_MODELS.joinToString("\n")
             }) { Text("RESET MODELS AND VOICE TO DEFAULTS") }
         }
 
@@ -499,9 +537,14 @@ private fun Diagnostics(settings: Settings, saveFirst: () -> Unit) {
     DiagRow("Live connection", saveFirst) {
         val s = Settings(app)
         withContext(Dispatchers.IO) {
-            val models = listOf(s.liveModel, s.liveFallbackModel).filter { it.isNotBlank() }.distinct()
-            val results = models.map { m -> m to LiveErrors.probe(s, m) }
-            val text = results.joinToString("\n") { (m, r) -> "$m: " + (r ?: "OK (setupComplete)") }
+            // Models skipped for quota are not probed (each probe opens a session); RETRY in Live mode clears them.
+            val results = s.liveModels.map { m -> m to (s.liveSkipReason(m)?.let { "skipped: $it" } ?: LiveErrors.probe(s, m)) }
+            val u = LiveUsage.today(s)
+            val text = results.joinToString("\n") { (m, r) -> "$m: " + (r ?: "OK (setupComplete)") } +
+                (if (u.err.isNotBlank()) "\nLast Live error (${u.errModel}, ${java.text.SimpleDateFormat("MM-dd HH:mm", java.util.Locale.US)
+                    .format(java.util.Date(u.errAt))}): ${u.err}" else "") +
+                "\nToday: audio sent ${LiveUsage.fmt(u.sentMs)} of ${LiveUsage.fmt(u.sessionMs)} in Live, ${u.sessions} session(s); " +
+                "quota saver ${if (s.liveQuotaSaver) "on" else "off"}"
             if (results.none { it.second == null }) throw IllegalStateException(text)
             text
         }
@@ -597,6 +640,44 @@ private fun MemoryScreen(back: () -> Unit) {
                 Text(m.text, color = Color(0xFFDCEBF0), fontSize = 14.sp, modifier = Modifier.weight(1f).padding(vertical = 8.dp))
                 TextButton(onClick = { Memories.delete(ctx, m.id) }) { Text("DELETE", color = Dim, fontSize = 12.sp) }
             }
+        }
+    }
+}
+
+/** v5: per-model status with RETRY, and today's Live usage with the last quota error (COPY). */
+@Composable
+private fun LiveStatusPanel(settings: Settings) {
+    val ctx = LocalContext.current
+    var tick by remember { mutableStateOf(0) }
+    key(tick) {
+        Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(8.dp)).background(Panel).padding(8.dp)) {
+            Text("Models (saved list):", color = Cyan, fontSize = 12.sp)
+            LiveModels.status(settings).forEachIndexed { i, (m, st) ->
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text("${i + 1}. $m: $st", color = if (st == "ready") Dim else Color(0xFFFFC48A), fontSize = 12.sp,
+                        modifier = Modifier.weight(1f))
+                    if (st != "ready") TextButton(onClick = { settings.unskipLiveModel(m); tick++ }) { Text("RETRY NOW", fontSize = 11.sp) }
+                }
+            }
+            val u = LiveUsage.today(settings)
+            val pct = if (u.sessionMs > 0) " (${u.sentMs * 100 / u.sessionMs}%)" else ""
+            Spacer(Modifier.height(6.dp))
+            Text("Today (Pacific day ${u.day}):", color = Cyan, fontSize = 12.sp)
+            Text("Audio sent ${LiveUsage.fmt(u.sentMs)} of ${LiveUsage.fmt(u.sessionMs)} in Live$pct · ${u.sessions} session(s)" +
+                (if (u.model.isNotBlank()) " · last model ${u.model}" else ""), color = Dim, fontSize = 12.sp)
+            if (u.err.isNotBlank()) {
+                val at = java.text.SimpleDateFormat("MM-dd HH:mm", java.util.Locale.getDefault()).format(java.util.Date(u.errAt))
+                val line = "Last Live error ($at, ${u.errModel}): ${u.err}"
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(line, color = Color(0xFFFFC48A), fontSize = 12.sp, modifier = Modifier.weight(1f))
+                    TextButton(onClick = {
+                        ctx.getSystemService(ClipboardManager::class.java)?.setPrimaryClip(ClipData.newPlainText("Jarvis Live error",
+                            "Jarvis ${BuildConfigInfo.version(ctx)}\n$line\nToday: sent ${LiveUsage.fmt(u.sentMs)} of ${LiveUsage.fmt(u.sessionMs)}, " +
+                                "${u.sessions} session(s)\n" + LiveModels.status(settings).joinToString("\n") { "${it.first}: ${it.second}" }))
+                    }) { Text("COPY", fontSize = 11.sp) }
+                }
+            }
+            TextButton(onClick = { tick++ }) { Text("REFRESH", fontSize = 11.sp) }
         }
     }
 }

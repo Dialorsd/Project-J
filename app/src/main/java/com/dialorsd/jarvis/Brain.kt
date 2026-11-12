@@ -40,10 +40,10 @@ object Brain {
      * its result text (blocking); when the first reply contains info actions the model answers again with the results.
      */
     fun chat(s: Settings, history: List<Msg>, userText: String, ctx: ChatContext, image: ByteArray? = null,
-             info: ((Action) -> String?)? = null): Reply {
+             info: ((Action) -> String?)? = null, preferGroq: Boolean = false): Reply {
         val turns = history.filter { it.role == "user" || it.role == "jarvis" }.takeLast(Defaults.HISTORY_TURNS * 2)
             .map { (if (it.role == "user") "user" else "model") to it.text } + ("user" to userText)
-        val first = parseReply(generate(s, chatPrompt(s, ctx, allowSearch = ctx.webSearch), turns, json = true, image = image))
+        val first = parseReply(generate(s, chatPrompt(s, ctx, allowSearch = ctx.webSearch), turns, json = true, image = image, preferGroq = preferGroq))
         val search = first.actions.firstOrNull { it.type == "search" && it.str("query").isNotBlank() }
         val infos = first.actions.filter { it.type in INFO_TYPES }
         if ((search == null || !ctx.webSearch) && infos.isNotEmpty() && info != null) {
@@ -51,7 +51,7 @@ object Brain {
             val results = infos.joinToString("\n\n") { a -> "[${a.type} result]\n" + (runCatching { info(a) }.getOrElse { "error: ${it.message}" } ?: "done") }
             val turns2 = turns + ("model" to first.say.ifBlank { "(checking)" }) +
                 ("user" to "$results\n[End of results. Now answer my previous message using them. Do not repeat these lookup actions.]")
-            val second = parseReply(generate(s, chatPrompt(s, ctx, allowSearch = false), turns2, json = true, image = image))
+            val second = parseReply(generate(s, chatPrompt(s, ctx, allowSearch = false), turns2, json = true, image = image, preferGroq = preferGroq))
             val keep = first.actions.filter { it.type !in INFO_TYPES && it.type != "search" }
             val extra = second.actions.filter { it.type !in INFO_TYPES && it.type != "search" && keep.none { k -> k.raw.toString() == it.raw.toString() } }
             return second.copy(actions = keep + extra)
@@ -64,7 +64,7 @@ object Brain {
         val found = try { lookup(s, q) } catch (e: BrainException) { Lookup("(web search failed: ${e.message})", emptyList()) }
         val turns2 = turns + ("model" to first.say.ifBlank { "(searching the web)" }) +
             ("user" to "[Web search results for \"$q\"]\n${found.text}\n[End of results. Now answer my previous message using them. Mention that you looked it up only if useful.]")
-        val second = parseReply(generate(s, chatPrompt(s, ctx, allowSearch = false), turns2, json = true, image = image))
+        val second = parseReply(generate(s, chatPrompt(s, ctx, allowSearch = false), turns2, json = true, image = image, preferGroq = preferGroq))
         return second.copy(actions = second.actions.filter { it.type != "search" && it.type !in INFO_TYPES }, sources = found.sources)
     }
 
@@ -298,8 +298,16 @@ At most about 8 short sentences, no lists or markdown. Output ONLY a JSON object
     // ---------- transport ----------
 
     /** turns: list of (role "user"/"model", text). Returns raw model text. */
-    fun generate(s: Settings, system: String, turns: List<Pair<String, String>>, json: Boolean, image: ByteArray? = null): String {
+    fun generate(s: Settings, system: String, turns: List<Pair<String, String>>, json: Boolean, image: ByteArray? = null,
+                 preferGroq: Boolean = false): String {
         if (s.geminiKey.isBlank()) throw BrainException(Failure.NO_KEY, "No Gemini API key")
+        // v5 hands-free: Groq first to save the Gemini quota; Gemini (then nothing else) if Groq fails.
+        if (preferGroq && s.groqKey.isNotBlank() && image == null) {
+            try {
+                return groq(s.groqKey, s.groqModel, system, turns)
+            } catch (_: BrainException) {
+            }
+        }
         val models = listOf(s.model, s.fallbackModel).filter { it.isNotBlank() }.distinct()
         var first: BrainException? = null
         for (m in models) {
