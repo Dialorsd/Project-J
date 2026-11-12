@@ -9,7 +9,8 @@ It uses the free Gemini API (and optionally a free Groq key as a backup).
 
 ## Install on your phone
 
-1. On the phone, open this repository on GitHub → **Releases** → **latest** → tap **jarvis.apk**.
+1. On the phone, open https://github.com/Dialorsd/Project-J/releases/latest and tap **jarvis.apk**
+   (direct link: https://github.com/Dialorsd/Project-J/releases/download/latest/jarvis.apk).
 2. When Android asks, allow your browser to **install unknown apps** (Settings → Apps → your browser →
    Install unknown apps → Allow). This is needed because the app is not from the Play Store.
 3. Open the downloaded file and tap **Install** (or **Update**). New builds install over the old one;
@@ -56,9 +57,10 @@ Keys are stored only on the phone, in the app's private storage. They are never 
 
 ## Note about the signing key
 
-The key that signs the APK (`keystore/jarvis.jks`) is committed to this **private** repository on
-purpose, so every build can update the previous one. Anyone with access to the repository could sign
-an app that updates this one; keep the repository private.
+The key that signs the APK (`keystore/jarvis.jks`) and its password are committed to this repository
+on purpose, so every build can update the previous one. Because this repository is public, anyone could
+sign an APK with that key that your phone would accept as an update, so only install APKs downloaded
+from this repository's Releases page.
 
 ## For developers
 
