@@ -23,6 +23,12 @@ object Defaults {
     const val SEARCH_MODEL = "gemini-2.5-flash"
     const val SEARCH_FALLBACK_MODEL = "gemini-2.5-flash-lite"
 
+    // Groq built-in browser search (https://console.groq.com/docs/browser-search): free, about 1,000 requests/day.
+    const val GROQ_SEARCH_MODEL = "openai/gpt-oss-120b"
+    const val GROQ_SEARCH_FALLBACK_MODEL = "openai/gpt-oss-20b"
+    /** A model the API refused for being closed to this key / lacking grounding is skipped for this long. */
+    const val SEARCH_BLOCK_MS = 7L * 24 * 3600 * 1000
+
     const val NTFY_SERVER = "https://ntfy.sh"
 
     // Groq OpenAI-compatible chat completions (optional backup brain).
@@ -93,6 +99,36 @@ class Settings(context: Context) {
     var searchModel: String
         get() = p.getString("search_model", null)?.takeIf { it.isNotBlank() } ?: Defaults.SEARCH_MODEL
         set(v) = p.edit().putString("search_model", v.trim()).apply()
+
+    var groqSearchModel: String
+        get() = p.getString("groq_search_model", null)?.takeIf { it.isNotBlank() } ?: Defaults.GROQ_SEARCH_MODEL
+        set(v) = p.edit().putString("groq_search_model", v.trim()).apply()
+    var groqSearchFallback: String
+        get() = p.getString("groq_search_fallback", null) ?: Defaults.GROQ_SEARCH_FALLBACK_MODEL
+        set(v) = p.edit().putString("groq_search_fallback", v.trim()).apply()
+
+    // Search models the API refused ("no longer available to new users", no grounding on this tier...):
+    // JSON {modelId: {"ts": millis, "why": text}}. Skipped for SEARCH_BLOCK_MS, then retried.
+    private fun blockedAll(): org.json.JSONObject = runCatching { org.json.JSONObject(p.getString("search_blocked", "{}")!!) }
+        .getOrDefault(org.json.JSONObject())
+    /** Reason the model is currently skipped, or null if it should be tried. */
+    fun searchBlockReason(model: String): String? {
+        val o = blockedAll().optJSONObject(model) ?: return null
+        if (System.currentTimeMillis() - o.optLong("ts") > Defaults.SEARCH_BLOCK_MS) return null
+        return o.optString("why").ifBlank { "refused earlier" }
+    }
+    fun blockSearchModel(model: String, why: String) {
+        val all = blockedAll()
+        all.put(model, org.json.JSONObject().put("ts", System.currentTimeMillis()).put("why", why.take(160)))
+        p.edit().putString("search_blocked", all.toString()).apply()
+    }
+    fun unblockSearchModel(model: String) {
+        val all = blockedAll(); all.remove(model); p.edit().putString("search_blocked", all.toString()).apply()
+    }
+    fun clearBlockedSearchModels() { p.edit().remove("search_blocked").apply() }
+    /** Last time each search provider answered (diagnostic display only). */
+    fun searchLastOk(provider: String): Long = p.getLong("search_ok_$provider", 0L)
+    fun markSearchOk(provider: String) { p.edit().putLong("search_ok_$provider", System.currentTimeMillis()).apply() }
 
     // PC link (ntfy)
     var pcLink: Boolean

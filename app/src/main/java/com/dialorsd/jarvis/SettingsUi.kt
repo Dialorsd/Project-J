@@ -34,6 +34,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -122,6 +123,9 @@ private fun SettingsMain(settings: Settings, resumeTick: Int, close: () -> Unit,
     var groqModel by remember { mutableStateOf(settings.groqModel) }
     var searchModel by remember { mutableStateOf(settings.searchModel) }
     var webSearch by remember { mutableStateOf(settings.webSearch) }
+    var groqSearch by remember { mutableStateOf(settings.groqSearchModel) }
+    var groqSearchFb by remember { mutableStateOf(settings.groqSearchFallback) }
+    var searchTick by remember { mutableStateOf(0) }
     var lang by remember { mutableStateOf(settings.speechLang) }
     var mode by remember { mutableStateOf(settings.voiceMode) }
     var humour by remember { mutableStateOf(settings.humour) }
@@ -165,7 +169,11 @@ private fun SettingsMain(settings: Settings, resumeTick: Int, close: () -> Unit,
         settings.geminiKey = gemini; settings.groqKey = groq
         settings.model = model; settings.fallbackModel = fallback; settings.ttsModel = tts
         settings.ttsVoice = voice; settings.ttsStyle = style; settings.groqModel = groqModel
+        // Editing a model field gives that model a fresh chance.
+        if (searchModel.trim() != settings.searchModel) settings.unblockSearchModel(searchModel.trim())
         settings.searchModel = searchModel; settings.webSearch = webSearch
+        settings.groqSearchModel = groqSearch; settings.groqSearchFallback = groqSearchFb
+        searchTick++
         settings.speechLang = lang; settings.voiceMode = mode; settings.humour = humour
         settings.ntfyServer = server
         if (topic.isNotBlank()) settings.ntfyTopic = topic
@@ -277,15 +285,27 @@ private fun SettingsMain(settings: Settings, resumeTick: Int, close: () -> Unit,
                 "and internet only while it runs (a notification with End is shown) and ends itself after 10 silent minutes.")
             SwitchRow("Allow interrupting him", "Speak over Jarvis to stop him. Turn off if he keeps interrupting himself " +
                 "on the loudspeaker (poor echo cancellation); then the mic pauses while he talks.", bargeIn) { bargeIn = it }
-            SwitchRow("Google Search inside Live", "Off: web lookups go through the separate search helper (recommended, " +
-                "500 free a day). On: the Live model searches by itself (may hit free-tier limits).", grounding) { grounding = it }
+            SwitchRow("Google Search inside Live", "Off: web lookups go through the separate search helper (recommended: Gemini, Groq, Wikipedia in turn). " +
+                "On: the Live model searches by itself. Google lists this as free for Live models, so it may be worth trying.", grounding) { grounding = it }
             Hint("Live model names are under ADVANCED.")
         }
 
         // ---------------------------------------------------------------- WEB SEARCH
         SectionHeader("WEB SEARCH", isOpen("WEB")) { toggle("WEB") }
         if (isOpen("WEB")) {
-            SwitchRow("Web search", "Google Search through Gemini 2.5 Flash (free: about 500 searches a day).", webSearch) { webSearch = it }
+            SwitchRow("Web search", "Tries in order: Gemini Google Search (free only for older keys that can still use Gemini 2.5), " +
+                "then Groq browser search (free, about 1,000 searches a day, needs the Groq key), then Wikipedia (facts only).", webSearch) { webSearch = it }
+            Hint("Provider order and status (after SAVE):")
+            key(searchTick) {
+                WebSearch.status(settings).forEachIndexed { i, (name, st) ->
+                    Text("${i + 1}. $name: $st", color = if (st.startsWith("skipped") || st == "no key") Color(0xFFFFC48A) else Dim, fontSize = 12.sp)
+                }
+            }
+            OutlinedButton(onClick = { settings.clearBlockedSearchModels(); searchTick++ }) { Text("RETRY BLOCKED MODELS") }
+            OutlinedTextField(groqSearch, { groqSearch = it }, Modifier.fillMaxWidth(), label = { Text("Groq search model") }, singleLine = true)
+            OutlinedTextField(groqSearchFb, { groqSearchFb = it }, Modifier.fillMaxWidth(), label = { Text("Groq search backup model (blank = none)") }, singleLine = true)
+            Hint("The Gemini search model is under ADVANCED. A model that Google refuses (for example \"no longer available to new users\") " +
+                "is skipped for 7 days; changing its name or tapping RETRY gives it another chance.")
         }
 
         // ---------------------------------------------------------------- v4 NOTIFICATIONS
@@ -488,8 +508,9 @@ private fun Diagnostics(settings: Settings, saveFirst: () -> Unit) {
     }
     DiagRow("Web search", saveFirst) {
         withContext(Dispatchers.IO) {
-            val r = Brain.lookup(Settings(app), "What is today's date?")
-            r.text.take(160) + " (${r.sources.size} sources)"
+            val r = Brain.lookup(Settings(app), "What is the capital of Ukraine?")
+            "Answered by: ${r.provider}\n" + (if (r.notes.isNotBlank()) "Earlier providers failed:\n${r.notes}\n" else "") +
+                r.text.take(160) + " (${r.sources.size} sources)"
         }
     }
     DiagRow("Weather", saveFirst) {

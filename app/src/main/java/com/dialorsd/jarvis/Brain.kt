@@ -18,7 +18,7 @@ data class Action(val type: String, val seconds: Long = 0, val label: String = "
 data class Reply(val say: String, val actions: List<Action>, val sources: List<Pair<String, String>> = emptyList())
 
 /** Result of a grounded web lookup: answer text plus (title, url) sources. */
-data class Lookup(val text: String, val sources: List<Pair<String, String>>)
+data class Lookup(val text: String, val sources: List<Pair<String, String>>, val provider: String = "", val notes: String = "")
 
 enum class Failure { NO_KEY, BAD_KEY, QUOTA, NETWORK, SERVER, MODEL, OTHER }
 
@@ -68,38 +68,8 @@ object Brain {
         return second.copy(actions = second.actions.filter { it.type != "search" && it.type !in INFO_TYPES }, sources = found.sources)
     }
 
-    /** Grounded lookup with Google Search (free tier on Gemini 2.5 Flash / Flash-Lite). Plain text, no JSON mode. */
-    fun lookup(s: Settings, query: String): Lookup {
-        if (s.geminiKey.isBlank()) throw BrainException(Failure.NO_KEY, "No Gemini API key")
-        val sys = "Search the web and answer the query with concise, factual, up-to-date information " +
-            "(include dates, numbers, names). Answer in the language of the query. Plain text, no markdown."
-        val body = JSONObject()
-            .put("systemInstruction", JSONObject().put("parts", JSONArray().put(JSONObject().put("text", sys))))
-            .put("contents", JSONArray().put(JSONObject().put("role", "user")
-                .put("parts", JSONArray().put(JSONObject().put("text", query)))))
-            .put("tools", JSONArray().put(JSONObject().put("google_search", JSONObject())))
-        var first: BrainException? = null
-        for (m in listOf(s.searchModel, Defaults.SEARCH_FALLBACK_MODEL).distinct()) {
-            try {
-                val o = JSONObject(post(Defaults.GEMINI_BASE + m + ":generateContent", body.toString(), mapOf("x-goog-api-key" to s.geminiKey)))
-                val cand = o.optJSONArray("candidates")?.optJSONObject(0)
-                val text = partsText(cand)
-                if (text.isBlank()) throw BrainException(Failure.OTHER, "empty search answer")
-                val sources = mutableListOf<Pair<String, String>>()
-                val chunks = cand?.optJSONObject("groundingMetadata")?.optJSONArray("groundingChunks")
-                if (chunks != null) for (i in 0 until chunks.length()) {
-                    val w = chunks.optJSONObject(i)?.optJSONObject("web") ?: continue
-                    val uri = w.optString("uri")
-                    if (uri.isNotBlank() && sources.none { it.second == uri }) sources += w.optString("title").ifBlank { uri } to uri
-                }
-                return Lookup(text, sources.take(6))
-            } catch (e: BrainException) {
-                if (first == null) first = e
-                if (e.kind !in setOf(Failure.QUOTA, Failure.SERVER, Failure.MODEL)) break
-            }
-        }
-        throw first ?: BrainException(Failure.OTHER, "search failed")
-    }
+    /** Web lookup through the provider chain (Gemini grounding, Groq browser search, Wikipedia). See [WebSearch]. */
+    fun lookup(s: Settings, query: String): Lookup = WebSearch.lookup(s, query)
 
     /** Runs a background task. Returns (spoken summary, full result, sources). */
     fun task(s: Settings, prompt: String): Triple<String, String, List<Pair<String, String>>> {
@@ -303,7 +273,7 @@ At most about 8 short sentences, no lists or markdown. Output ONLY a JSON object
         return Reply(say.trim(), acts)
     }
 
-    private fun partsText(cand: JSONObject?): String {
+    internal fun partsText(cand: JSONObject?): String {
         val parts = cand?.optJSONObject("content")?.optJSONArray("parts") ?: return ""
         val sb = StringBuilder()
         for (i in 0 until parts.length()) {

@@ -32,7 +32,7 @@ What he can do (version 3):
 - **Widget, Quick Settings tile, headset button** (new): see "Quick access" below.
 - Talk (English or Ukrainian), with a choice of Gemini voices (Settings → Voice → Preview to try them).
 - **Timers** ("call me in 10 minutes"), and **background tasks** ("write me a plan for…") — he calls you when done.
-- **Look things up on the web** (Google Search through Gemini; free, about 500 searches a day). Sources are listed under the answer.
+- **Look things up on the web** (tries Gemini Google Search, which is free only for older keys that can still use Gemini 2.5; then Groq browser search with your Groq key, free, about 1,000 a day; then Wikipedia for plain facts). Sources are listed under the answer. Settings > Web search shows the order and status.
 - **Remember** things ("remember that my sister's birthday is 3 May"); see or delete them in Settings → Memory.
 - **Calendar**: "what's on tomorrow?", "add dentist on Friday at 3 pm".
 - **Navigation**: "take me to the train station" opens Google Maps navigation.
