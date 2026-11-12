@@ -220,8 +220,8 @@ class HandsFreeEngine(private val ctx: Context, private val announce: String?, p
             val uk = hasCyrillic(text)
             val reply = try {
                 withContext(Dispatchers.IO) {
-                    Brain.chat(s, history, text, chatContext(ctx, s), null, { a -> runBlocking { Info.run(ctx, a, uk) } },
-                        preferGroq = s.handsFreePreferGroq)
+                    Brain.chat(s, history, text, chatContext(ctx, s), image = null, preferGroq = s.handsFreePreferGroq,
+                        info = { a -> runBlocking { Info.run(ctx, a, uk) } })
                 }
             } catch (e: Exception) {
                 Reply(Brain.errorLine(e, uk), emptyList())

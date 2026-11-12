@@ -40,7 +40,7 @@ object Brain {
      * its result text (blocking); when the first reply contains info actions the model answers again with the results.
      */
     fun chat(s: Settings, history: List<Msg>, userText: String, ctx: ChatContext, image: ByteArray? = null,
-             info: ((Action) -> String?)? = null, preferGroq: Boolean = false): Reply {
+             preferGroq: Boolean = false, info: ((Action) -> String?)? = null): Reply {
         val turns = history.filter { it.role == "user" || it.role == "jarvis" }.takeLast(Defaults.HISTORY_TURNS * 2)
             .map { (if (it.role == "user") "user" else "model") to it.text } + ("user" to userText)
         val first = parseReply(generate(s, chatPrompt(s, ctx, allowSearch = ctx.webSearch), turns, json = true, image = image, preferGroq = preferGroq))
