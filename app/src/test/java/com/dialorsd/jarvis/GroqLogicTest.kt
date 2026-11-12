@@ -266,7 +266,9 @@ class GroqLogicTest {
     }
 
     @Test fun veryLongSpeechIsCutAtTheCap() {
-        val x = mix(noise(14.0, -65.0), concat(silence(0.5), voice(12.0, -22.0, false), silence(1.5)))
+        // Words of 0.8 s with 150 ms gaps (a flat, gapless tone would look like steady noise to the gate and close it by itself).
+        val words = (1..15).map { concat(voice(0.8, -22.0, false), silence(0.15)) }.toTypedArray()
+        val x = mix(noise(16.0, -65.0), concat(silence(0.5), *words, silence(1.5)))
         val us = feedAll(UtteranceCutter(maxMs = 5000), x).mapNotNull { it.utterance }
         assertTrue("got ${us.size}", us.size >= 2)
         assertTrue(us[0].forced)
