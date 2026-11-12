@@ -139,6 +139,14 @@ private fun MainScreen(settings: Settings, resumeTick: Int, openSettings: () -> 
         if (ok) ear.start(lang) else Store.addMessage("note", "Microphone permission denied: you can still type.")
     }
 
+    val calLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { }
+    DisposableEffect(Unit) {
+        Jarvis.requestCalendar = {
+            calLauncher.launch(arrayOf(Manifest.permission.READ_CALENDAR, Manifest.permission.WRITE_CALENDAR))
+        }
+        onDispose { Jarvis.requestCalendar = null }
+    }
+
     LaunchedEffect(Store.messages.size) {
         if (Store.messages.isNotEmpty()) listState.animateScrollToItem(Store.messages.size - 1)
     }
@@ -212,6 +220,7 @@ private fun MainScreen(settings: Settings, resumeTick: Int, openSettings: () -> 
 
 @Composable
 private fun Bubble(m: Msg) {
+    if (m.role == "sources") { SourcesBubble(m); return }
     val (bg, fg, align) = when (m.role) {
         "user" -> Triple(Color(0xFF12303A), Color(0xFFE6F6FA), Alignment.End)
         "jarvis" -> Triple(Panel, Color(0xFFDCEBF0), Alignment.Start)
@@ -224,6 +233,20 @@ private fun Bubble(m: Msg) {
                 .then(if (m.role == "jarvis") Modifier.border(1.dp, Cyan.copy(alpha = 0.3f), RoundedCornerShape(12.dp)) else Modifier)
                 .padding(horizontal = 12.dp, vertical = 8.dp)
         )
+    }
+}
+
+@Composable
+private fun SourcesBubble(m: Msg) {
+    val ctx = LocalContext.current
+    Column(Modifier.fillMaxWidth().padding(start = 8.dp)) {
+        Text("SOURCES", color = Dim, fontFamily = FontFamily.Monospace, fontSize = 10.sp, letterSpacing = 2.sp)
+        m.text.lines().filter { it.contains('\t') }.forEach { line ->
+            val title = line.substringBefore('\t')
+            val url = line.substringAfter('\t')
+            Text(title, color = Cyan, fontSize = 12.sp, maxLines = 1,
+                modifier = Modifier.clickable { open(ctx, Intent(Intent.ACTION_VIEW, Uri.parse(url))) }.padding(vertical = 2.dp))
+        }
     }
 }
 
@@ -252,7 +275,7 @@ private fun TimerList() {
 
 /** Warnings for permissions that break the "he calls me" feature, with buttons to the system screens. */
 @Composable
-private fun PermissionBanners(resumeTick: Int) {
+fun PermissionBanners(resumeTick: Int) {
     val ctx = LocalContext.current
     // resumeTick forces a re-check whenever the user comes back from system settings.
     val notif = remember(resumeTick) { Caller.canNotify(ctx) }
@@ -283,7 +306,7 @@ private fun Banner(text: String, button: String, onClick: () -> Unit) {
     }
 }
 
-private fun open(ctx: Context, intent: Intent) {
+fun open(ctx: Context, intent: Intent) {
     try {
         ctx.startActivity(intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
     } catch (e: ActivityNotFoundException) {
@@ -372,86 +395,5 @@ private class Ear(private val ctx: Context) {
         runCatching { rec?.destroy() }
         rec = null
         if (Store.orb.value == OrbState.LISTENING) Store.setOrb(OrbState.IDLE)
-    }
-}
-
-// ---------------------------------------------------------------- settings
-
-@Composable
-private fun SettingsScreen(settings: Settings, resumeTick: Int, close: () -> Unit) {
-    val ctx = LocalContext.current
-    var gemini by remember { mutableStateOf(settings.geminiKey) }
-    var groq by remember { mutableStateOf(settings.groqKey) }
-    var model by remember { mutableStateOf(settings.model) }
-    var fallback by remember { mutableStateOf(settings.fallbackModel) }
-    var tts by remember { mutableStateOf(settings.ttsModel) }
-    var voice by remember { mutableStateOf(settings.ttsVoice) }
-    var groqModel by remember { mutableStateOf(settings.groqModel) }
-    var lang by remember { mutableStateOf(settings.speechLang) }
-    var mode by remember { mutableStateOf(settings.voiceMode) }
-    var humour by remember { mutableStateOf(settings.humour) }
-
-    fun save() {
-        settings.geminiKey = gemini; settings.groqKey = groq
-        settings.model = model; settings.fallbackModel = fallback; settings.ttsModel = tts
-        settings.ttsVoice = voice; settings.groqModel = groqModel
-        settings.speechLang = lang; settings.voiceMode = mode; settings.humour = humour
-    }
-
-    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).imePadding().padding(16.dp),
-        verticalArrangement = Arrangement.spacedBy(10.dp)) {
-        Text("SETTINGS", color = Cyan, fontFamily = FontFamily.Monospace, fontSize = 20.sp, letterSpacing = 3.sp)
-
-        if (settings.geminiKey.isBlank()) {
-            Text(
-                "Jarvis needs a free Gemini API key to think.\n" +
-                    "1. Open aistudio.google.com and sign in with a Google account.\n" +
-                    "2. Tap \"Get API key\" and create a key.\n" +
-                    "3. Copy it and paste it below. It is stored only on this phone.",
-                color = Color(0xFFDCEBF0), fontSize = 14.sp
-            )
-            OutlinedButton(onClick = { open(ctx, Intent(Intent.ACTION_VIEW, Uri.parse("https://aistudio.google.com/apikey"))) }) {
-                Text("OPEN AI STUDIO")
-            }
-        }
-
-        OutlinedTextField(gemini, { gemini = it }, Modifier.fillMaxWidth(), label = { Text("Gemini API key (required)") },
-            singleLine = true, visualTransformation = PasswordVisualTransformation())
-        OutlinedTextField(groq, { groq = it }, Modifier.fillMaxWidth(), label = { Text("Groq API key (optional backup)") },
-            singleLine = true, visualTransformation = PasswordVisualTransformation())
-
-        Text("Speech language", color = Dim)
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            SpeechLang.entries.forEach { l -> FilterChip(lang == l, { lang = l }, label = { Text(l.label) }) }
-        }
-        Text("Voice", color = Dim)
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            VoiceMode.entries.forEach { m -> FilterChip(mode == m, { mode = m }, label = { Text(m.label) }) }
-        }
-        Text("Humour: " + when {
-            humour < 0.2f -> "professional"; humour < 0.45f -> "polite, a little dry"
-            humour < 0.75f -> "dry wit"; else -> "sarcastic"
-        }, color = Dim)
-        Slider(humour, { humour = it })
-
-        Text("Models (change only if a model is renamed or retired)", color = Dim)
-        OutlinedTextField(model, { model = it }, Modifier.fillMaxWidth(), label = { Text("Gemini model") }, singleLine = true)
-        OutlinedTextField(fallback, { fallback = it }, Modifier.fillMaxWidth(), label = { Text("Gemini backup model (blank = none)") }, singleLine = true)
-        OutlinedTextField(tts, { tts = it }, Modifier.fillMaxWidth(), label = { Text("Gemini voice model") }, singleLine = true)
-        OutlinedTextField(voice, { voice = it }, Modifier.fillMaxWidth(), label = { Text("Gemini voice name") }, singleLine = true)
-        OutlinedTextField(groqModel, { groqModel = it }, Modifier.fillMaxWidth(), label = { Text("Groq model") }, singleLine = true)
-        TextButton(onClick = {
-            model = Defaults.GEMINI_MODEL; fallback = Defaults.GEMINI_FALLBACK_MODEL; tts = Defaults.GEMINI_TTS_MODEL
-            voice = Defaults.GEMINI_TTS_VOICE; groqModel = Defaults.GROQ_MODEL
-        }) { Text("RESET MODELS TO DEFAULTS") }
-
-        PermissionBanners(resumeTick)
-
-        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-            Button(onClick = { save(); if (settings.geminiKey.isNotBlank()) close() }, enabled = gemini.isNotBlank()) { Text("SAVE") }
-            if (settings.geminiKey.isNotBlank()) OutlinedButton(onClick = close) { Text("BACK") }
-            TextButton(onClick = { Store.clearMessages() }) { Text("CLEAR CHAT", color = Dim) }
-        }
-        Spacer(Modifier.height(40.dp))
     }
 }

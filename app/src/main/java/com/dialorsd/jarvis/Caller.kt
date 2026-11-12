@@ -64,10 +64,14 @@ object Caller {
             Intent(ctx, DeclineReceiver::class.java).putExtra(EXTRA_CALL, call.id), flags)
 
         val jarvis = Person.Builder().setName("Jarvis").setImportant(true).build()
-        val text = if (call.kind == "task") "Task finished: ${call.label}" else "Timer finished: ${call.label}"
+        val text = when (call.kind) {
+            "task" -> "Task finished: ${call.label}"
+            "pc" -> "PC: ${call.label}"
+            else -> "Timer finished: ${call.label}"
+        }
         val n = NotificationCompat.Builder(ctx, CH_CALL)
             .setSmallIcon(R.drawable.ic_stat_jarvis)
-            .setContentTitle("Jarvis is calling")
+            .setContentTitle(if (call.kind == "pc") "PC: ${call.label}" else "Jarvis is calling")
             .setContentText(text)
             .setCategory(NotificationCompat.CATEGORY_CALL)
             .setPriority(NotificationCompat.PRIORITY_MAX)

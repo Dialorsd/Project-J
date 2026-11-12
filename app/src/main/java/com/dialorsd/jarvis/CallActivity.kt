@@ -89,7 +89,11 @@ class CallActivity : ComponentActivity() {
         callId = id
         label = call.label
         phase.value = Phase.RINGING
-        caption.value = if (call.kind == "task") "Task finished: ${call.label}" else "Timer: ${call.label}"
+        caption.value = when (call.kind) {
+            "task" -> "Task finished: ${call.label}"
+            "pc" -> "PC: ${call.label}"
+            else -> "Timer: ${call.label}"
+        }
         if (i?.action == Caller.ACTION_ANSWER) answer()
     }
 
@@ -98,15 +102,23 @@ class CallActivity : ComponentActivity() {
         Caller.stopRinging(this, call.id)
         Store.removeCall(call.id)
         phase.value = Phase.CONNECTED
-        val uk = if (call.kind == "task") hasCyrillic(call.line) else Store.lastLanguageIsUkrainian()
+        val uk = when (call.kind) {
+            "task" -> hasCyrillic(call.line)
+            "pc" -> hasCyrillic(call.detail + call.label)
+            else -> Store.lastLanguageIsUkrainian()
+        }
         job = Jarvis.scope.launch {
             val line = call.line.ifBlank {
                 Store.setOrb(OrbState.THINKING)
+                val situation = if (call.kind == "pc")
+                    "the user's computer sent a message. Title: \"${call.label}\". Message: \"${call.detail}\". Relay it faithfully."
+                else "the timer \"${call.label}\" the user asked for has just finished."
                 val generated = withTimeoutOrNull(8000) {
-                    withContext(Dispatchers.IO) { runCatching { Brain.callLine(Settings(this@CallActivity), call.label, uk) }.getOrNull() }
+                    withContext(Dispatchers.IO) { runCatching { Brain.callLine(Settings(this@CallActivity), situation, uk) }.getOrNull() }
                 }
                 Store.setOrb(OrbState.IDLE)
-                generated?.takeIf { it.isNotBlank() } ?: Brain.fallbackCallLine(call.label, uk)
+                generated?.takeIf { it.isNotBlank() }
+                    ?: if (call.kind == "pc") Brain.fallbackPcLine(call.label, call.detail, uk) else Brain.fallbackCallLine(call.label, uk)
             }
             caption.value = line
             Store.addMessage("jarvis", line)

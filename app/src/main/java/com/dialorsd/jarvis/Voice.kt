@@ -52,7 +52,10 @@ object Voice {
         try {
             var done = false
             if (s.voiceMode == VoiceMode.GEMINI && !hasCyrillic(clean) && s.geminiKey.isNotBlank()) {
-                done = runCatching { withContext(Dispatchers.IO) { geminiSpeak(s, clean) } }.getOrDefault(false)
+                done = runCatching {
+                    val (pcm, rate) = withContext(Dispatchers.IO) { synth(s, s.ttsVoice, s.ttsStyle, clean) }
+                    withContext(Dispatchers.IO) { playPcm(pcm, rate) }
+                }.getOrDefault(false)
             }
             if (!done && !stopped) phoneSpeak(context, clean)
         } finally {
@@ -60,49 +63,127 @@ object Voice {
         }
     }
 
+    /**
+     * Settings "Preview": speaks a sample with the given Gemini voice. Returns null on success or a
+     * description of why Gemini TTS failed (it then does NOT fall back, so the user can tell).
+     */
+    suspend fun preview(context: Context, voice: String, style: String): String? {
+        val s = Settings(context)
+        if (s.geminiKey.isBlank()) return "No Gemini API key saved."
+        stop()
+        stopped = false
+        Store.setOrb(OrbState.SPEAKING)
+        return try {
+            val (pcm, rate) = withContext(Dispatchers.IO) {
+                synth(s, voice, style, "Good evening, sir. Everything is in order, and the kettle is, I assure you, already on.")
+            }
+            if (withContext(Dispatchers.IO) { playPcm(pcm, rate) }) null else "Audio playback failed on this phone."
+        } catch (e: Exception) {
+            e.message ?: e.toString()
+        } finally {
+            Store.setOrb(OrbState.IDLE)
+        }
+    }
+
     // ---------- Gemini TTS ----------
 
-    private suspend fun geminiSpeak(s: Settings, text: String): Boolean {
+    /**
+     * Returns (16-bit mono PCM, sample rate). Tries, in order: the Interactions API (current docs,
+     * style via speech_metadata), then legacy generateContent with the same model, then legacy
+     * generateContent with the fallback TTS model. Throws with all error messages if all fail.
+     */
+    private fun synth(s: Settings, voice: String, style: String, text: String): Pair<ByteArray, Int> {
+        val errors = mutableListOf<String>()
+        val attempts = listOf<Pair<String, () -> Pair<ByteArray, Int>>>(
+            "interactions ${s.ttsModel}" to { interactionsTts(s, s.ttsModel, voice, style, text) },
+            "generateContent ${s.ttsModel}" to { legacyTts(s, s.ttsModel, voice, style, text) },
+            "generateContent ${Defaults.GEMINI_TTS_FALLBACK_MODEL}" to { legacyTts(s, Defaults.GEMINI_TTS_FALLBACK_MODEL, voice, style, text) },
+        ).distinctBy { it.first }
+        for ((name, call) in attempts) {
+            if (stopped) break
+            try {
+                return call()
+            } catch (e: BrainException) {
+                errors += "$name: ${e.kind} ${e.message}"
+                if (e.kind == Failure.BAD_KEY || e.kind == Failure.NETWORK) break
+            } catch (e: Exception) {
+                errors += "$name: ${e.message}"
+            }
+        }
+        throw IllegalStateException("Gemini voice failed. " + errors.joinToString(" | ").take(600))
+    }
+
+    private fun interactionsTts(s: Settings, model: String, voice: String, style: String, text: String): Pair<ByteArray, Int> {
+        val content = JSONObject().put("type", "text").put("text", text)
+        if (style.isNotBlank()) content.put("annotations", JSONArray().put(JSONObject().put("type", "speech_metadata").put("style", style)))
         val body = JSONObject()
-            .put("contents", JSONArray().put(JSONObject().put("parts", JSONArray().put(JSONObject()
-                .put("text", "Say in a calm, measured, dry British butler voice: $text")))))
+            .put("model", model)
+            .put("input", JSONArray().put(JSONObject().put("type", "user_input").put("content", JSONArray().put(content))))
+            .put("response_format", JSONObject().put("type", "audio"))
+            .put("generation_config", JSONObject().put("speech_config", JSONArray().put(JSONObject().put("voice", voice))))
+        val resp = Brain.post(Defaults.GEMINI_INTERACTIONS, body.toString(), mapOf("x-goog-api-key" to s.geminiKey), readTimeoutMs = 60_000)
+        // Find the last {"type":"audio","data":"..."} anywhere in the response (steps[].content[]).
+        var found: JSONObject? = null
+        fun walk(v: Any?) {
+            when (v) {
+                is JSONObject -> {
+                    if (v.optString("type") == "audio" && v.optString("data").isNotEmpty()) found = v
+                    v.keys().forEach { walk(v.opt(it)) }
+                }
+                is JSONArray -> for (i in 0 until v.length()) walk(v.opt(i))
+            }
+        }
+        walk(JSONObject(resp))
+        val a = found ?: throw IllegalStateException("no audio in response")
+        return decode(a.optString("data"), a.optString("mime_type", a.optString("mimeType")))
+    }
+
+    private fun legacyTts(s: Settings, model: String, voice: String, style: String, text: String): Pair<ByteArray, Int> {
+        val prompt = if (style.isNotBlank()) "Say in a $style voice: $text" else text
+        val body = JSONObject()
+            .put("contents", JSONArray().put(JSONObject().put("parts", JSONArray().put(JSONObject().put("text", prompt)))))
             .put("generationConfig", JSONObject()
                 .put("responseModalities", JSONArray().put("AUDIO"))
                 .put("speechConfig", JSONObject().put("voiceConfig", JSONObject()
-                    .put("prebuiltVoiceConfig", JSONObject().put("voiceName", s.ttsVoice)))))
-        val resp = Brain.post(Defaults.GEMINI_BASE + s.ttsModel + ":generateContent", body.toString(),
-            mapOf("x-goog-api-key" to s.geminiKey), readTimeoutMs = 45_000)
+                    .put("prebuiltVoiceConfig", JSONObject().put("voiceName", voice)))))
+        val resp = Brain.post(Defaults.GEMINI_BASE + model + ":generateContent", body.toString(),
+            mapOf("x-goog-api-key" to s.geminiKey), readTimeoutMs = 60_000)
         val parts = JSONObject(resp).optJSONArray("candidates")?.optJSONObject(0)
-            ?.optJSONObject("content")?.optJSONArray("parts") ?: return false
-        var b64: String? = null
-        var mime = ""
+            ?.optJSONObject("content")?.optJSONArray("parts") ?: throw IllegalStateException("no audio in response")
         for (i in 0 until parts.length()) {
             val d = parts.optJSONObject(i)?.optJSONObject("inlineData") ?: continue
-            b64 = d.optString("data"); mime = d.optString("mimeType"); break
+            return decode(d.optString("data"), d.optString("mimeType"))
         }
-        if (b64.isNullOrEmpty() || stopped) return false
+        throw IllegalStateException("no audio in response")
+    }
+
+    /** Base64 audio (WAV or raw 16-bit PCM) -> (PCM, rate). */
+    private fun decode(b64: String, mime: String): Pair<ByteArray, Int> {
+        if (b64.isEmpty()) throw IllegalStateException("empty audio")
         var pcm = Base64.decode(b64, Base64.DEFAULT)
         var rate = Regex("rate=(\\d+)").find(mime)?.groupValues?.get(1)?.toIntOrNull() ?: 24000
-        // Some responses are WAV (RIFF header) instead of raw 16-bit PCM.
         if (pcm.size > 44 && String(pcm, 0, 4, Charsets.US_ASCII) == "RIFF") {
-            rate = (pcm[24].toInt() and 0xFF) or ((pcm[25].toInt() and 0xFF) shl 8) or
-                ((pcm[26].toInt() and 0xFF) shl 16) or ((pcm[27].toInt() and 0xFF) shl 24)
+            rate = le32(pcm, 24)
             var off = 12
             var dataStart = 44
             var dataLen = pcm.size - 44
             while (off + 8 <= pcm.size) {
                 val id = String(pcm, off, 4, Charsets.US_ASCII)
-                val len = (pcm[off + 4].toInt() and 0xFF) or ((pcm[off + 5].toInt() and 0xFF) shl 8) or
-                    ((pcm[off + 6].toInt() and 0xFF) shl 16) or ((pcm[off + 7].toInt() and 0xFF) shl 24)
+                val len = le32(pcm, off + 4)
                 if (id == "data") { dataStart = off + 8; dataLen = minOf(len, pcm.size - dataStart); break }
+                if (len < 0) break
                 off += 8 + len
             }
             pcm = pcm.copyOfRange(dataStart, dataStart + dataLen)
             if (rate !in 8000..48000) rate = 24000
         }
-        if (pcm.size < 2) return false
-        return playPcm(pcm, rate)
+        if (pcm.size < 2) throw IllegalStateException("empty audio")
+        return pcm to rate
     }
+
+    private fun le32(b: ByteArray, i: Int): Int =
+        (b[i].toInt() and 0xFF) or ((b[i + 1].toInt() and 0xFF) shl 8) or
+            ((b[i + 2].toInt() and 0xFF) shl 16) or ((b[i + 3].toInt() and 0xFF) shl 24)
 
     private suspend fun playPcm(pcm: ByteArray, rate: Int): Boolean {
         val minBuf = AudioTrack.getMinBufferSize(rate, AudioFormat.CHANNEL_OUT_MONO, AudioFormat.ENCODING_PCM_16BIT)

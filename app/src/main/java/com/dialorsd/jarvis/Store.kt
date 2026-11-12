@@ -12,14 +12,14 @@ import org.json.JSONObject
 
 enum class OrbState { IDLE, LISTENING, THINKING, SPEAKING }
 
-/** role: "user", "jarvis" or "note". */
+/** role: "user", "jarvis", "note" or "sources" (lines of "title\turl"). */
 data class Msg(val role: String, val text: String, val time: Long = System.currentTimeMillis())
 
 /** kind: "timer" (endAt is when it rings) or "task" (endAt = 0, still running). */
 data class TimerItem(val id: Int, val label: String, val endAt: Long, val kind: String = "timer")
 
 /** A pending "phone call" from Jarvis. line = what he says on pick-up (empty = generate it). */
-data class CallInfo(val id: Int, val kind: String, val label: String, val line: String)
+data class CallInfo(val id: Int, val kind: String, val label: String, val line: String, val detail: String = "")
 
 /**
  * Tiny app-wide state + persistence (SharedPreferences JSON). Compose observes the state lists.
@@ -53,6 +53,10 @@ object Store {
         messages.add(Msg(role, text))
         while (messages.size > 200) messages.removeAt(0)
         saveMessages()
+    }
+
+    fun addSources(sources: List<Pair<String, String>>) {
+        if (sources.isNotEmpty()) addMessage("sources", sources.joinToString("\n") { "${it.first.replace('\t', ' ')}\t${it.second}" })
     }
 
     fun clearMessages() = onMain { messages.clear(); saveMessages() }
@@ -115,14 +119,14 @@ object Store {
     @Synchronized
     fun putCall(c: CallInfo) {
         val o = JSONObject(prefs.getString("calls", "{}") ?: "{}")
-        o.put(c.id.toString(), JSONObject().put("kind", c.kind).put("label", c.label).put("line", c.line))
+        o.put(c.id.toString(), JSONObject().put("kind", c.kind).put("label", c.label).put("line", c.line).put("detail", c.detail))
         prefs.edit().putString("calls", o.toString()).commit()
     }
 
     @Synchronized
     fun getCall(id: Int): CallInfo? = runCatching {
         val o = JSONObject(prefs.getString("calls", "{}") ?: "{}").optJSONObject(id.toString()) ?: return null
-        CallInfo(id, o.optString("kind", "timer"), o.optString("label"), o.optString("line"))
+        CallInfo(id, o.optString("kind", "timer"), o.optString("label"), o.optString("line"), o.optString("detail"))
     }.getOrNull()
 
     @Synchronized

@@ -11,47 +11,106 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
-data class Action(val type: String, val seconds: Long = 0, val label: String = "", val prompt: String = "")
-data class Reply(val say: String, val actions: List<Action>)
+data class Action(val type: String, val seconds: Long = 0, val label: String = "", val prompt: String = "",
+                  val raw: JSONObject = JSONObject()) {
+    fun str(key: String): String = raw.optString(key).let { if (it == "null") "" else it }.trim()
+}
+data class Reply(val say: String, val actions: List<Action>, val sources: List<Pair<String, String>> = emptyList())
+
+/** Result of a grounded web lookup: answer text plus (title, url) sources. */
+data class Lookup(val text: String, val sources: List<Pair<String, String>>)
 
 enum class Failure { NO_KEY, BAD_KEY, QUOTA, NETWORK, SERVER, MODEL, OTHER }
 
 class BrainException(val kind: Failure, message: String) : Exception(message)
+
+/** Extra context for the chat prompt (filled by the caller from device state). */
+data class ChatContext(val timers: List<TimerItem>, val calendar: String?, val webSearch: Boolean)
 
 /** The "brain": Gemini generateContent over HTTPS, with Groq as an optional backup. Blocking: call off the main thread. */
 object Brain {
 
     // ---------- public API ----------
 
-    fun chat(s: Settings, history: List<Msg>, userText: String, timers: List<TimerItem>): Reply {
-        val turns = history.filter { it.role != "note" }.takeLast(Defaults.HISTORY_TURNS * 2)
+    fun chat(s: Settings, history: List<Msg>, userText: String, ctx: ChatContext): Reply {
+        val turns = history.filter { it.role == "user" || it.role == "jarvis" }.takeLast(Defaults.HISTORY_TURNS * 2)
             .map { (if (it.role == "user") "user" else "model") to it.text } + ("user" to userText)
-        val text = generate(s, chatPrompt(s, timers), turns, json = true)
-        return parseReply(text)
+        val first = parseReply(generate(s, chatPrompt(s, ctx, allowSearch = ctx.webSearch), turns, json = true))
+        val search = first.actions.firstOrNull { it.type == "search" && it.str("query").isNotBlank() }
+        if (search == null || !ctx.webSearch) return first.copy(actions = first.actions.filter { it.type != "search" })
+
+        // Two-step: Google Search grounding cannot be combined with our JSON envelope on the free
+        // models, so do a plain-text grounded lookup, then answer again with the findings.
+        val q = search.str("query")
+        val found = try { lookup(s, q) } catch (e: BrainException) { Lookup("(web search failed: ${e.message})", emptyList()) }
+        val turns2 = turns + ("model" to first.say.ifBlank { "(searching the web)" }) +
+            ("user" to "[Web search results for \"$q\"]\n${found.text}\n[End of results. Now answer my previous message using them. Mention that you looked it up only if useful.]")
+        val second = parseReply(generate(s, chatPrompt(s, ctx, allowSearch = false), turns2, json = true))
+        return second.copy(actions = second.actions.filter { it.type != "search" }, sources = found.sources)
     }
 
-    /** Runs a background task. Returns (spoken summary, full result). */
-    fun task(s: Settings, prompt: String): Pair<String, String> {
-        val sys = character(s) + """
+    /** Grounded lookup with Google Search (free tier on Gemini 2.5 Flash / Flash-Lite). Plain text, no JSON mode. */
+    fun lookup(s: Settings, query: String): Lookup {
+        if (s.geminiKey.isBlank()) throw BrainException(Failure.NO_KEY, "No Gemini API key")
+        val sys = "Search the web and answer the query with concise, factual, up-to-date information " +
+            "(include dates, numbers, names). Answer in the language of the query. Plain text, no markdown."
+        val body = JSONObject()
+            .put("systemInstruction", JSONObject().put("parts", JSONArray().put(JSONObject().put("text", sys))))
+            .put("contents", JSONArray().put(JSONObject().put("role", "user")
+                .put("parts", JSONArray().put(JSONObject().put("text", query)))))
+            .put("tools", JSONArray().put(JSONObject().put("google_search", JSONObject())))
+        var first: BrainException? = null
+        for (m in listOf(s.searchModel, Defaults.SEARCH_FALLBACK_MODEL).distinct()) {
+            try {
+                val o = JSONObject(post(Defaults.GEMINI_BASE + m + ":generateContent", body.toString(), mapOf("x-goog-api-key" to s.geminiKey)))
+                val cand = o.optJSONArray("candidates")?.optJSONObject(0)
+                val text = partsText(cand)
+                if (text.isBlank()) throw BrainException(Failure.OTHER, "empty search answer")
+                val sources = mutableListOf<Pair<String, String>>()
+                val chunks = cand?.optJSONObject("groundingMetadata")?.optJSONArray("groundingChunks")
+                if (chunks != null) for (i in 0 until chunks.length()) {
+                    val w = chunks.optJSONObject(i)?.optJSONObject("web") ?: continue
+                    val uri = w.optString("uri")
+                    if (uri.isNotBlank() && sources.none { it.second == uri }) sources += w.optString("title").ifBlank { uri } to uri
+                }
+                return Lookup(text, sources.take(6))
+            } catch (e: BrainException) {
+                if (first == null) first = e
+                if (e.kind !in setOf(Failure.QUOTA, Failure.SERVER, Failure.MODEL)) break
+            }
+        }
+        throw first ?: BrainException(Failure.OTHER, "search failed")
+    }
+
+    /** Runs a background task. Returns (spoken summary, full result, sources). */
+    fun task(s: Settings, prompt: String): Triple<String, String, List<Pair<String, String>>> {
+        var research = ""
+        var sources: List<Pair<String, String>> = emptyList()
+        if (s.webSearch) {
+            runCatching { lookup(s, prompt) }.onSuccess { research = it.text; sources = it.sources }
+        }
+        val sys = character(s) + memoryBlock() + """
 
 You are now doing a background task the user delegated to you. Do it thoroughly and accurately.
-You cannot browse the internet; if the task needs live data, say so honestly and do your best from knowledge.
+${if (research.isNotBlank()) "Web research notes are provided below the task; use them and prefer them over your own memory for current facts." else "You have no internet access for this task; if it needs live data, say so honestly and do your best."}
 Answer in the language of the task text (English or Ukrainian).
 Output ONLY a JSON object: {"summary": "<at most 3 short spoken sentences addressed to the user>", "result": "<the full result as plain text, no markdown tables>"}"""
-        val text = generate(s, sys, listOf("user" to prompt), json = true)
+        val input = if (research.isBlank()) prompt else "$prompt\n\n[Web research notes]\n$research"
+        val text = generate(s, sys, listOf("user" to input), json = true)
         val o = parseJsonObject(text)
         val summary = o?.optString("summary").orEmpty().ifBlank { text.take(300) }
         val result = o?.optString("result").orEmpty().ifBlank { text }
-        return summary to result
+        return Triple(summary, result, sources)
     }
 
-    /** A short line for when the user picks up a timer call. */
-    fun callLine(s: Settings, label: String, ukrainian: Boolean): String {
+    /** A short line for when the user picks up a call (timer finished, PC message...). */
+    fun callLine(s: Settings, situation: String, ukrainian: Boolean): String {
         val lang = if (ukrainian) "Ukrainian" else "English"
         val sys = character(s) + """
 
-You are phoning the user because a timer they asked for has just finished.
-Write ONE short spoken line (max 2 sentences) in $lang that tells them the timer "$label" is done.
+You are phoning the user. Situation: $situation
+Write ONE short spoken line (max 2 sentences) in $lang telling them about it. Keep any names, numbers and the
+essential content of the message exactly.
 Output ONLY a JSON object: {"say": "..."}"""
         val text = generate(s, sys, listOf("user" to "(The user has just picked up the call.)"), json = true)
         return parseReply(text).say
@@ -60,6 +119,10 @@ Output ONLY a JSON object: {"say": "..."}"""
     fun fallbackCallLine(label: String, ukrainian: Boolean): String =
         if (ukrainian) "Сер, ваш таймер «$label» завершився."
         else "Sir, your timer \"$label\" has finished."
+
+    fun fallbackPcLine(title: String, message: String, ukrainian: Boolean): String =
+        if (ukrainian) "Сер, повідомлення з комп'ютера. $title. $message"
+        else "Sir, a message from your computer. $title. $message"
 
     /** In-character explanation of a failure, in the user's language. */
     fun errorLine(e: Throwable, ukrainian: Boolean): String {
@@ -100,24 +163,45 @@ Always reply in the language of the user's latest message (English or Ukrainian)
 Your replies are spoken aloud, so keep them short and natural: usually 1-3 sentences, no markdown, no emojis, no lists unless asked."""
     }
 
-    private fun chatPrompt(s: Settings, timers: List<TimerItem>): String {
+    private fun memoryBlock(): String {
+        val m = Memories.forPrompt()
+        return if (m.isBlank()) "" else "\n\nThings you remember about the user (most recent first):\n$m"
+    }
+
+    private fun chatPrompt(s: Settings, c: ChatContext, allowSearch: Boolean): String {
         val now = SimpleDateFormat("EEEE yyyy-MM-dd HH:mm", Locale.US).format(Date())
-        val active = if (timers.isEmpty()) "none" else timers.joinToString("; ") {
+        val active = if (c.timers.isEmpty()) "none" else c.timers.joinToString("; ") {
             if (it.kind == "task") "task \"${it.label}\" (running)"
             else "timer \"${it.label}\" (${((it.endAt - System.currentTimeMillis()) / 1000).coerceAtLeast(0)} s left)"
         }
-        return character(s) + """
+        val cal = when (c.calendar) {
+            null -> "Calendar: not available (no permission). If asked, tell the user to allow calendar access in Settings."
+            else -> "Calendar events for the next 7 days:\n${c.calendar}"
+        }
+        val search = if (allowSearch) """
+- {"type":"search","query":"..."}: look something up on the web (news, weather, prices, opening hours, recent
+  facts, anything you are not sure is current). Use it alone, with "say" empty; you will get the results and answer then."""
+        else ""
+        return character(s) + memoryBlock() + """
 
 Current local time: $now. Active timers and tasks: $active.
+$cal
 
-You can act through these actions only:
+You can act ONLY through these actions:
 - {"type":"timer","seconds":N,"label":"short name"}: set a countdown timer; when it ends you will phone the user.
 - {"type":"cancel_timer","label":"name of the timer, or all"}
 - {"type":"task","prompt":"a complete, self-contained instruction","label":"short name"}: for anything that needs
-  long thinking or writing (plans, research from your own knowledge, drafts, long explanations). You will do it in the
-  background and phone the user with the result. In "say", briefly confirm you are on it.
-You cannot access the internet, the user's contacts, messages, calendar or other apps. Never claim to have done
-something you did not do. Convert spoken durations to seconds exactly (e.g. "10 minutes" = 600).
+  long thinking, research or writing. You will do it in the background${if (s.webSearch) " (with web search)" else ""} and phone the
+  user with the result. In "say", briefly confirm you are on it.$search
+- {"type":"remember","text":"a fact about the user worth keeping"}: when the user tells you something to remember,
+  or a lasting preference/fact (names, birthdays, preferences). Do not store secrets such as passwords.
+- {"type":"forget","match":"words identifying the memory"}
+- {"type":"calendar_add","title":"...","start":"YYYY-MM-DDTHH:MM","end":"YYYY-MM-DDTHH:MM","location":"optional"}:
+  add an event to the phone's calendar (local time; if no end is given use one hour).
+- {"type":"navigate","destination":"address or place name"}: start Google Maps navigation.
+You cannot read messages or contacts or control other apps. Never say you have done something (set a timer, saved
+a memory, added an event, started navigation) unless you include the matching action in this same reply; the app
+confirms actions separately. Convert spoken durations to seconds exactly (e.g. "10 minutes" = 600).
 
 Output ONLY a JSON object, nothing else: {"say": "what you say aloud", "actions": [ ... ]} ("actions" may be empty)."""
     }
@@ -133,9 +217,20 @@ Output ONLY a JSON object, nothing else: {"say": "what you say aloud", "actions"
             val a = arr.optJSONObject(i) ?: continue
             val type = a.optString("type")
             val secs = a.optDouble("seconds", 0.0).let { if (it.isNaN()) 0L else it.toLong() }
-            acts += Action(type, secs, a.optString("label"), a.optString("prompt"))
+            acts += Action(type, secs, a.optString("label"), a.optString("prompt"), a)
         }
         return Reply(say.trim(), acts)
+    }
+
+    private fun partsText(cand: JSONObject?): String {
+        val parts = cand?.optJSONObject("content")?.optJSONArray("parts") ?: return ""
+        val sb = StringBuilder()
+        for (i in 0 until parts.length()) {
+            val p = parts.optJSONObject(i) ?: continue
+            if (p.optBoolean("thought", false)) continue
+            sb.append(p.optString("text"))
+        }
+        return sb.toString()
     }
 
     private fun stripFences(s: String): String =

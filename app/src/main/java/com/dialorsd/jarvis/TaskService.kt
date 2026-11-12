@@ -75,9 +75,10 @@ class TaskService : Service() {
         val s = Settings(this)
         val uk = hasCyrillic(prompt)
         val line: String = try {
-            val (summary, result) = Brain.task(s, prompt)
+            val (summary, result, sources) = Brain.task(s, prompt)
             if (item.id in cancelled) return
             Store.addMessage("jarvis", (if (uk) "Результат завдання «${item.label}»:\n" else "Task result \"${item.label}\":\n") + result)
+            Store.addSources(sources)
             summary
         } catch (e: Exception) {
             if (item.id in cancelled) return

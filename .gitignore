@@ -13,3 +13,5 @@ captures/
 # Never commit API keys or other secrets
 secrets.properties
 .env
+# PC link topic (secret)
+.jarvis-ping

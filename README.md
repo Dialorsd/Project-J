@@ -7,6 +7,16 @@ answer and he tells you the news.
 
 It uses the free Gemini API (and optionally a free Groq key as a backup).
 
+What he can do (version 2):
+
+- Talk (English or Ukrainian), with a choice of Gemini voices (Settings → Preview to try them).
+- **Timers** ("call me in 10 minutes"), and **background tasks** ("write me a plan for…") — he calls you when done.
+- **Look things up on the web** (Google Search through Gemini; free, about 500 searches a day). Sources are listed under the answer.
+- **Remember** things ("remember that my sister's birthday is 3 May"); see or delete them in Settings → Memory.
+- **Calendar**: "what's on tomorrow?", "add dentist on Friday at 3 pm".
+- **Navigation**: "take me to the train station" opens Google Maps navigation.
+- **PC link**: your computer (or Claude Code) can make Jarvis call you. See [pc/README.md](pc/README.md).
+
 ## Install on your phone
 
 1. On the phone, open https://github.com/Dialorsd/Project-J/releases/latest and tap **jarvis.apk**
@@ -34,7 +44,9 @@ Keys are stored only on the phone, in the app's private storage. They are never 
 - **Full-screen notifications** (Android 14+): lets the call screen appear over the lock screen.
   If it is off, the app shows a banner with an **Allow** button.
 - **Alarms & reminders** (exact alarms): so timers ring on time even when the app is closed.
-- **Run at startup**: timers are restored after the phone restarts.
+- **Run at startup**: timers are restored after the phone restarts, and the PC link reconnects.
+- **Calendar** (optional): to read your upcoming events and add new ones. Asked for in Settings or the first time you ask him to add an event.
+- **Background connection** (only if PC link is on): an always-on silent notification "Jarvis is listening for your PC".
 
 ## Using it
 
@@ -45,13 +57,15 @@ Keys are stored only on the phone, in the app's private storage. They are never 
   The full result is in the chat.
 - Settings: voice (Gemini voice / phone voice / muted), humour slider, model names.
 
-## Known limits of version 1
+## Known limits
 
 - No wake word ("Hey Jarvis") and no continuous conversation: tap the mic each time.
-- He cannot browse the internet, read messages or control other apps.
+- He cannot read messages or contacts or control other apps. Web search answers questions; it does not open web pages for you.
+- Memories, recent chat and calendar events are sent to Gemini with your questions (that is how he knows them).
 - Background tasks are lost if the phone restarts or Android kills the app mid-task.
 - Gemini voice is used for English only; Ukrainian uses the phone's own voice
   (install a Ukrainian voice in the phone's text-to-speech settings for best results).
+- PC link keeps a connection open and uses some extra battery. Anyone who knows your topic can ring your phone; keep it secret.
 - Free quotas are limited per day; when used up, Jarvis says so (or uses Groq if you added a key).
 - Speech recognition uses the phone's built-in service (usually Google) and may need internet.
 
