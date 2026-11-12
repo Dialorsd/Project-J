@@ -7,9 +7,18 @@ answer and he tells you the news.
 
 It uses the free Gemini API (and optionally a free Groq key as a backup).
 
-What he can do (version 2):
+What he can do (version 3):
 
-- Talk (English or Ukrainian), with a choice of Gemini voices (Settings → Preview to try them).
+- **Live conversation** (new): tap **LIVE CONVERSATION** and just talk, hands-free, like a phone call. You can
+  interrupt him while he speaks. Works with the screen off; a notification with **End** shows while it runs.
+- **Morning call** (new): at the time you choose he rings and reads a short briefing: date, weather, today's
+  events, timers, messages from your PC overnight and open notes.
+- **Reminders that nag** (new): "remind me at 5 pm to call mum". If you decline or miss the call he rings again
+  (every 10 min, up to 3 times by default) until you tap **Done**.
+- **Notes and lists** (new): "add milk to my shopping list", "what's on my shopping list?". See them under **NOTES**.
+- **Heads-ups** (new): a notification before calendar events; optional low-battery warning.
+- **Widget, Quick Settings tile, headset button** (new): see "Quick access" below.
+- Talk (English or Ukrainian), with a choice of Gemini voices (Settings → Voice → Preview to try them).
 - **Timers** ("call me in 10 minutes"), and **background tasks** ("write me a plan for…") — he calls you when done.
 - **Look things up on the web** (Google Search through Gemini; free, about 500 searches a day). Sources are listed under the answer.
 - **Remember** things ("remember that my sister's birthday is 3 May"); see or delete them in Settings → Memory.
@@ -39,7 +48,10 @@ Keys are stored only on the phone, in the app's private storage. They are never 
 
 ## Permissions it asks for, and why
 
-- **Microphone**: to hear you when you tap the mic button. You can always type instead.
+- **Microphone**: to hear you when you tap the mic button or start Live mode. You can always type instead.
+- **Microphone in the background** (Live mode only, Android 14+ "microphone" foreground service): keeps Live mode
+  working with the screen off. It only runs after you start Live mode and always shows a notification with **End**.
+- **Change audio settings**: Live mode switches to speakerphone / your headset like a phone call.
 - **Notifications**: needed for Jarvis to "call" you.
 - **Full-screen notifications** (Android 14+): lets the call screen appear over the lock screen.
   If it is off, the app shows a banner with an **Allow** button.
@@ -50,6 +62,38 @@ Keys are stored only on the phone, in the app's private storage. They are never 
 
 ## Using it
 
+### Live conversation
+
+1. Tap **LIVE CONVERSATION** under the orb (allow the microphone if asked).
+2. Talk normally. The orb shows LISTENING, THINKING (doing something, e.g. setting a timer) or SPEAKING.
+   Speak over him to interrupt. Both sides of the conversation are written into the chat.
+3. **MUTE** pauses the microphone, **END** (or End in the notification) stops. He also stops after 10 silent minutes.
+
+If he keeps interrupting himself on the loudspeaker, turn off Settings → Live mode → "Allow interrupting him",
+or use headphones. If Live mode cannot start, the normal mic button still works exactly as before.
+
+### Quick access
+
+- **Widget**: long-press the home screen → Widgets → Jarvis. **TALK** opens the app listening, **LIVE** starts
+  Live mode; the next timer is shown underneath.
+- **Quick Settings tile**: pull down the quick settings, tap the pencil, drag **Jarvis Live** in. Tapping it opens
+  Jarvis in Live mode (tap again to end).
+- **Headset button**: while the app is open, a press starts/stops listening; in Live mode it mutes/unmutes.
+  It is not captured while the app is closed.
+
+### Morning call
+
+Settings → Morning call: turn it on, set the time (e.g. 07:30), the days, and your city (tap CHECK). "Try the
+morning call now" tests it. Weather comes from Open-Meteo (free, no account, no location permission).
+
+### Diagnostics
+
+Settings → Diagnostics has TEST buttons for the Gemini text model, the Gemini voice, the Live connection, web
+search, weather and a test call in 5 seconds. Each shows OK or the exact error; **COPY** copies it to send to the
+developer.
+
+### Classic mode
+
 - Tap the round mic button and speak, or type. The **EN / UK / AUTO** chip at the top chooses the
   speech-recognition language.
 - "Set a timer for 10 minutes for the pasta" → a countdown appears; when it ends, Jarvis calls.
@@ -57,14 +101,34 @@ Keys are stored only on the phone, in the app's private storage. They are never 
   The full result is in the chat.
 - Settings: voice (Gemini voice / phone voice / muted), humour slider, model names.
 
+## Battery
+
+- **Live mode**: uses the microphone and the network continuously, but only while it is running (notification
+  shown). Expect roughly the drain of a phone call. It ends itself after 10 silent minutes.
+- **Morning call, timers, reminders, event heads-ups**: alarms only (no background loops). The event heads-up
+  wakes the phone at most once per event plus a check every 6 hours.
+- **Low battery warning** (off by default): a system broadcast while the app is in memory, plus a half-hourly
+  check that never wakes the phone by itself.
+- **Widget**: updated only when timers change. **Tile / headset button**: nothing runs in the background.
+- **PC link**: keeps a connection open (see below).
+
 ## Known limits
 
-- No wake word ("Hey Jarvis") and no continuous conversation: tap the mic each time.
+- No wake word ("Hey Jarvis"): start Live mode or tap the mic.
+- Live mode uses Google's free Live models (currently `gemini-3.8-live`, backup `gemini-3.1-flash-live-preview`;
+  editable under Settings → Advanced). Free-tier limits are not published per model; when they are used up
+  Jarvis says so and the normal mic button still works. Long Live sessions reconnect every ~10 minutes
+  (Google's connection limit) and resume the conversation; if resuming fails a fresh session starts.
+- In Live mode, timers, notes, calendar and so on are done through the same actions as in normal mode; background
+  tasks still call you when they finish.
 - He cannot read messages or contacts or control other apps. Web search answers questions; it does not open web pages for you.
-- Memories, recent chat and calendar events are sent to Gemini with your questions (that is how he knows them).
+- Memories, notes and lists, recent chat and calendar events are sent to Gemini with your questions (that is how he knows them).
+  In Live mode your voice is streamed to Google while the session runs.
 - Background tasks are lost if the phone restarts or Android kills the app mid-task.
-- Gemini voice is used for English only; Ukrainian uses the phone's own voice
-  (install a Ukrainian voice in the phone's text-to-speech settings for best results).
+- Push-to-talk: Gemini voice is used for English only; Ukrainian uses the phone's own voice
+  (install a Ukrainian voice in the phone's text-to-speech settings for best results). Live mode speaks both.
+- The morning call and reminders need "Alarms & reminders" and full-screen notifications allowed to ring on time
+  over the lock screen. The headset button works only while the app is open or Live mode runs.
 - PC link keeps a connection open and uses some extra battery. Anyone who knows your topic can ring your phone; keep it secret.
 - Free quotas are limited per day; when used up, Jarvis says so (or uses Groq if you added a key).
 - Speech recognition uses the phone's built-in service (usually Google) and may need internet.
@@ -78,6 +142,7 @@ from this repository's Releases page.
 
 ## For developers
 
-Kotlin + Jetpack Compose, single `app` module, no other frameworks. Built by GitHub Actions
+Kotlin + Jetpack Compose, single `app` module; the only library besides AndroidX is OkHttp (WebSocket for
+the Live API). No DI or navigation frameworks. Weather: [Open-Meteo](https://open-meteo.com/) (CC BY 4.0). Built by GitHub Actions
 (`.github/workflows/build.yml`) on every push to `main`; the APK is attached to the `latest` release.
 Model IDs are in `app/src/main/java/com/dialorsd/jarvis/Config.kt` and can be changed in Settings.
