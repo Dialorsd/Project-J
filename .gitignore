@@ -15,3 +15,7 @@ secrets.properties
 .env
 # PC link topic (secret)
 .jarvis-ping
+# PC remote settings (contain the secret)
+.jarvis-pc.json
+.jarvis-pc.nonces
+.jarvis-pc.log

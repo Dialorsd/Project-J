@@ -7,6 +7,18 @@ answer and he tells you the news.
 
 It uses the free Gemini API (and optionally a free Groq key as a backup).
 
+What's new in version 4:
+
+- **Reads your notifications** when you ask ("any new messages?", "what did Telegram say?"), only from apps you tick.
+- **"Call me when…" web watchers**: "call me when example.com is back up", "tell me when this page says 'in stock'",
+  "call me when the price drops below 500".
+- **Sees things**: CAMERA and GALLERY buttons on the main screen, or Share → Jarvis from any app (screenshots);
+  then ask about the picture by typing or with the mic.
+- **PC remote**: "how is my PC?", "lock my PC", "call me when the render finishes", "shut down the PC when the
+  download is done" (signed requests, only commands you switch on; see [pc/README.md](pc/README.md)).
+- **Interpreter**: tap INTERPRETER, pick two languages (Ukrainian ⇄ English by default) and talk in turns.
+- **Daily wrap-up**: an evening summary (Settings → Daily wrap-up), or ask "what happened today?".
+
 What he can do (version 3):
 
 - **Live conversation** (new): tap **LIVE CONVERSATION** and just talk, hands-free, like a phone call. You can
@@ -59,6 +71,24 @@ Keys are stored only on the phone, in the app's private storage. They are never 
 - **Run at startup**: timers are restored after the phone restarts, and the PC link reconnects.
 - **Calendar** (optional): to read your upcoming events and add new ones. Asked for in Settings or the first time you ask him to add an event.
 - **Background connection** (only if PC link is on): an always-on silent notification "Jarvis is listening for your PC".
+- **Notification access** (v4, optional, special access in system settings): to read your notifications when you ask.
+  Because the app is installed from a file, Android may show "Restricted setting": open Jarvis's **App info → ⋮ →
+  Allow restricted settings**, then turn on access again (Settings → Notifications → OPEN ACCESS SETTINGS).
+- **Camera and photos** (v4): no permission. The camera button opens your normal camera app; the gallery uses
+  Android's photo picker, which only gives Jarvis the one picture you choose.
+- **Battery: Unrestricted** (v4, recommended on Samsung): Settings → Battery (Samsung) → APP INFO → Battery →
+  Unrestricted, so PC link, PC replies and watchers are not put to sleep.
+
+## Privacy (v4)
+
+- **Notifications**: nothing is read or kept until you tick apps in Settings → Notifications (or tap ALLOW MESSAGING &
+  MAIL APPS). Texts from ticked apps are stored on the phone only, for 24 hours (max 100). They are sent to Google
+  Gemini **only when you ask** about your notifications, not with every question (unless you turn on "Announce in Live
+  mode"). Banking, authenticator, password-manager and wallet apps and anything that looks like a one-time code are
+  always skipped; Android 15+ also hides one-time codes from apps like Jarvis.
+- **Pictures** you ask about are sent to Google Gemini with your question (downscaled). A small thumbnail stays in the chat.
+- Gemini's **free tier** may use what you send to improve Google's products, and people may review it. Don't send
+  anything that must stay private.
 
 ## Using it
 
@@ -89,8 +119,25 @@ morning call now" tests it. Weather comes from Open-Meteo (free, no account, no 
 ### Diagnostics
 
 Settings → Diagnostics has TEST buttons for the Gemini text model, the Gemini voice, the Live connection, web
-search, weather and a test call in 5 seconds. Each shows OK or the exact error; **COPY** copies it to send to the
+search, weather, a test call in 5 seconds, and (v4) notification access, a watcher check of example.com, a picture
+question with a generated test image, the PC remote status round trip and the wrap-up. Each shows OK or the exact error; **COPY** copies it to send to the
 developer.
+
+### New in v4
+
+- **Notifications**: Settings → Notifications → OPEN ACCESS SETTINGS → turn on Jarvis (see "Restricted setting" above
+  if it is greyed out). Come back, tap ALLOW MESSAGING & MAIL APPS or tick apps in the list (the list fills as apps
+  post notifications). Then ask "any new messages?" or "what did Gmail say in the last hour?".
+- **Watchers**: just say it, e.g. "call me when https://example.com is back up" or "check this page every hour and call
+  me when it says 'in stock'". They show under the timers with the last check and a CANCEL button. One page load per
+  check, every 30 min by default (15 min at least), up to 10 watchers; a watcher stops after it rings unless you asked to
+  keep watching. Price/number watchers only work on simple pages that show the number in their HTML.
+- **Pictures**: tap CAMERA or GALLERY (or share a screenshot to Jarvis), then type or say your question, e.g. "what does
+  this error mean?" or "translate this sign". With no question he describes the picture.
+- **PC remote**: pair once (Settings → PC link → PAIR PC, then [pc/README.md](pc/README.md)), then ask.
+- **Interpreter**: main screen → INTERPRETER, choose the two languages, START. Put the phone between you and the other
+  person and speak in turns; both texts are shown large. It uses Live mode, which speaks Ukrainian too.
+- **Daily wrap-up**: Settings → Daily wrap-up (default 21:00, notification; "Ring instead" makes it a call).
 
 ### Classic mode
 
@@ -110,7 +157,12 @@ developer.
 - **Low battery warning** (off by default): a system broadcast while the app is in memory, plus a half-hourly
   check that never wakes the phone by itself.
 - **Widget**: updated only when timers change. **Tile / headset button**: nothing runs in the background.
-- **PC link**: keeps a connection open (see below).
+- **PC link**: keeps a connection open (see below). PC remote replies use the same connection (nothing extra).
+- **Notification reading** (v4): Android calls Jarvis when a notification arrives; it saves a few lines. Negligible.
+- **Watchers** (v4): one short page load per watcher every 30 min (or what you chose), scheduled by Android's
+  WorkManager, so checks may be delayed while the phone sleeps. 10 watchers at 30 min ≈ 480 small downloads a day.
+- **Daily wrap-up** (v4): one alarm a day plus one Gemini request.
+- **Interpreter** (v4): same as Live mode, only while it runs.
 
 ## Known limits
 
@@ -121,7 +173,10 @@ developer.
   (Google's connection limit) and resume the conversation; if resuming fails a fresh session starts.
 - In Live mode, timers, notes, calendar and so on are done through the same actions as in normal mode; background
   tasks still call you when they finish.
-- He cannot read messages or contacts or control other apps. Web search answers questions; it does not open web pages for you.
+- He can read notifications (only ticked apps) but cannot reply to messages, read contacts or control other apps.
+  No wake word yet; the interpreter needs Live mode (internet).
+- Gemini's text-to-speech does not list Ukrainian, so push-to-talk answers in Ukrainian use the phone's voice;
+  Live mode and the interpreter speak Ukrainian with the Gemini voice. Web search answers questions; it does not open web pages for you.
 - Memories, notes and lists, recent chat and calendar events are sent to Gemini with your questions (that is how he knows them).
   In Live mode your voice is streamed to Google while the session runs.
 - Background tasks are lost if the phone restarts or Android kills the app mid-task.
