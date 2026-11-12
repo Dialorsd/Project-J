@@ -35,6 +35,20 @@ object Defaults {
     const val GROQ_MODEL = "llama-3.3-70b-versatile"
     const val GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
 
+    // Groq voice mode (docs checked 2026-11-12: console.groq.com/docs/speech-to-text, /text-to-speech/orpheus, /rate-limits).
+    // Whisper large v3 is more accurate than the turbo variant (10.3% vs 12% word error rate in Groq's table), and the
+    // free limits are identical, so it is the default; turbo is the automatic backup.
+    const val GROQ_BASE = "https://api.groq.com/openai/v1"
+    const val GROQ_STT_MODEL = "whisper-large-v3"
+    const val GROQ_STT_FALLBACK_MODEL = "whisper-large-v3-turbo"
+    const val GROQ_TTS_MODEL = "canopylabs/orpheus-v1-english"
+    /** Orpheus English male voices per the docs: austin, daniel, troy. */
+    val GROQ_TTS_MALE_VOICES = listOf("daniel", "troy", "austin")
+    const val GROQ_TTS_VOICE = "daniel"
+    /** Fastest listed Groq chat model (1000 tokens/s, free: 30 req/min, 1K req/day, 8K tokens/min, 200K tokens/day). */
+    const val GROQ_VOICE_MODEL = "openai/gpt-oss-20b"
+    const val GROQ_TERMS_URL = "https://console.groq.com/playground?model=canopylabs%2Forpheus-v1-english"
+
     const val HISTORY_TURNS = 12
 
     // Gemini Live API (realtime voice). Both models are listed as free of charge on the free tier
@@ -67,6 +81,19 @@ object Defaults {
 enum class SpeechLang(val label: String) { AUTO("AUTO"), EN("EN"), UK("UK") }
 
 enum class VoiceMode(val label: String) { GEMINI("Gemini voice"), PHONE("Phone voice"), MUTED("Muted") }
+
+/** What the conversation button starts (and what Live hands over to when its quota is spent). */
+enum class MainMode(val label: String) {
+    LIVE("Gemini Live"), GROQ("Groq voice mode (hands-free)"), PHONE("Phone hands-free")
+}
+/** When every Gemini Live model is out of quota. */
+enum class SpentAction(val label: String) {
+    GROQ("Groq voice loop (recommended)"), PHONE("Phone hands-free"), STOP("Stop")
+}
+/** How Groq voice mode hears you. */
+enum class Hearing(val label: String) { WHISPER("Groq Whisper"), PHONE("Phone recognizer") }
+/** Keep listening after the user answers a call from Jarvis. */
+enum class AfterCall(val label: String) { ALWAYS("Always"), TASKS("Only for finished tasks"), NEVER("Never") }
 
 /** Settings stored only in app-private SharedPreferences (never logged, never backed up). */
 class Settings(context: Context) {
@@ -200,6 +227,57 @@ class Settings(context: Context) {
     var handsFreePreferGroq: Boolean
         get() = p.getBoolean("hands_free_groq", true)
         set(v) = p.edit().putBoolean("hands_free_groq", v).apply()
+    // ---- v6: Groq voice mode, spent-quota chain, after-call listening ----
+    /** What the conversation button starts. Until chosen: the old hands-free switch (Groq voice mode if a Groq key is saved). */
+    var mainMode: MainMode
+        get() = p.getString("main_mode", null)?.let { runCatching { MainMode.valueOf(it) }.getOrNull() }
+            ?: if (handsFreeDefault) (if (groqKey.isNotBlank()) MainMode.GROQ else MainMode.PHONE) else MainMode.LIVE
+        set(v) = p.edit().putString("main_mode", v.name).putBoolean("hands_free_default", v != MainMode.LIVE).apply()
+    var spentAction: SpentAction
+        get() = runCatching { SpentAction.valueOf(p.getString("live_spent_action", "GROQ")!!) }.getOrDefault(SpentAction.GROQ)
+        set(v) = p.edit().putString("live_spent_action", v.name).apply()
+    /** Groq Whisper by default when a Groq key is saved; the phone recognizer otherwise (and as the fallback). */
+    var hearing: Hearing
+        get() = p.getString("hf_hearing", null)?.let { runCatching { Hearing.valueOf(it) }.getOrNull() }
+            ?: if (groqKey.isNotBlank()) Hearing.WHISPER else Hearing.PHONE
+        set(v) = p.edit().putString("hf_hearing", v.name).apply()
+    var groqSttModel: String
+        get() = p.getString("groq_stt_model", null)?.takeIf { it.isNotBlank() } ?: Defaults.GROQ_STT_MODEL
+        set(v) = p.edit().putString("groq_stt_model", v.trim()).apply()
+    var groqTtsModel: String
+        get() = p.getString("groq_tts_model", null)?.takeIf { it.isNotBlank() } ?: Defaults.GROQ_TTS_MODEL
+        set(v) = p.edit().putString("groq_tts_model", v.trim()).apply()
+    var groqTtsVoice: String
+        get() = p.getString("groq_tts_voice", null)?.takeIf { it.isNotBlank() } ?: Defaults.GROQ_TTS_VOICE
+        set(v) = p.edit().putString("groq_tts_voice", v.trim().lowercase()).apply()
+    /** Speak with Groq's English voice first in Groq voice mode. */
+    var groqTtsOn: Boolean
+        get() = p.getBoolean("groq_tts_on", true)
+        set(v) = p.edit().putBoolean("groq_tts_on", v).apply()
+    /** Chat model for the Groq voice loop (blank in the field = the default). */
+    var groqVoiceModel: String
+        get() = p.getString("groq_voice_model", null)?.takeIf { it.isNotBlank() } ?: Defaults.GROQ_VOICE_MODEL
+        set(v) = p.edit().putString("groq_voice_model", v.trim()).apply()
+    /** Let him be interrupted in Groq voice mode (off by default: the speaker is not echo-cancelled there). */
+    var hfBargeIn: Boolean
+        get() = p.getBoolean("hf_barge_in", false)
+        set(v) = p.edit().putBoolean("hf_barge_in", v).apply()
+    /** Set when Groq asked for a one-time acceptance of the TTS model's terms; shown in Settings. */
+    var groqTtsTerms: String
+        get() = p.getString("groq_tts_terms", "") ?: ""
+        set(v) = p.edit().putString("groq_tts_terms", v.take(300)).apply()
+    /** Today's Groq usage counters (JSON, see [GroqUsage]). */
+    var groqUsage: String
+        get() = p.getString("groq_usage", "{}") ?: "{}"
+        set(v) = p.edit().putString("groq_usage", v).apply()
+    var afterCall: AfterCall
+        get() = runCatching { AfterCall.valueOf(p.getString("after_call", "TASKS")!!) }.getOrDefault(AfterCall.TASKS)
+        set(v) = p.edit().putString("after_call", v.name).apply()
+    /** Seconds of silence before a session that continues after a call ends itself. */
+    var postCallIdleSec: Int
+        get() = p.getInt("post_call_idle_sec", 30)
+        set(v) = p.edit().putInt("post_call_idle_sec", v.coerceIn(10, 300)).apply()
+
     /** Mute the recognizer's start beep in hands-free mode. */
     var handsFreeQuietBeep: Boolean
         get() = p.getBoolean("hands_free_quiet_beep", true)

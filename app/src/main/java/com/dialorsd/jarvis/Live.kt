@@ -96,13 +96,19 @@ object LiveSession {
      * Must be called while an activity of ours is visible (microphone foreground-service rule).
      * [handsFree]: null = as chosen in Settings (Live mode section).
      */
-    fun start(ctx: Context, interpreter: Boolean = false, handsFree: Boolean? = null) {
+    fun start(ctx: Context, interpreter: Boolean = false, handsFree: Boolean? = null, idleMs: Long = 0L) {
         if (active) return
-        val hf = !interpreter && (handsFree ?: Settings(ctx).handsFreeDefault)
+        val s = Settings(ctx)
+        val main = s.mainMode
+        val hf = !interpreter && (handsFree ?: (main != MainMode.LIVE))
+        // v6: Groq voice mode needs the Groq key; without it the old phone hands-free loop runs.
+        val profile = if (main == MainMode.GROQ && s.groqKey.isNotBlank()) MainMode.GROQ else MainMode.PHONE
         try {
             ContextCompat.startForegroundService(ctx, Intent(ctx, LiveService::class.java)
                 .putExtra(LiveService.EXTRA_INTERPRETER, interpreter)
-                .putExtra(LiveService.EXTRA_HANDS_FREE, hf))
+                .putExtra(LiveService.EXTRA_HANDS_FREE, hf)
+                .putExtra(LiveService.EXTRA_PROFILE, profile.name)
+                .putExtra(LiveService.EXTRA_IDLE_MS, idleMs))
         } catch (e: Exception) {
             Store.addMessage("note", "Live mode could not start: ${e.javaClass.simpleName}: ${e.message}")
         }
@@ -134,11 +140,15 @@ class LiveService : Service() {
         const val ACTION_STOP = "com.dialorsd.jarvis.LIVE_STOP"
         const val EXTRA_INTERPRETER = "interpreter"
         const val EXTRA_HANDS_FREE = "hands_free"
+        const val EXTRA_PROFILE = "profile"
+        const val EXTRA_IDLE_MS = "idle_ms"
         const val CH_LIVE = "jarvis_live"
         private const val NOTIF_ID = 44
     }
 
     private var engine: Conversation? = null
+    private var idleMs = 0L                       // > 0: this session continues a call and ends after this much silence
+    private var profile = MainMode.PHONE
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -169,8 +179,11 @@ class LiveService : Service() {
         })
         val interp = intent?.getBooleanExtra(EXTRA_INTERPRETER, false) == true
         val hf = !interp && intent?.getBooleanExtra(EXTRA_HANDS_FREE, false) == true
+        profile = runCatching { MainMode.valueOf(intent?.getStringExtra(EXTRA_PROFILE) ?: "PHONE") }.getOrDefault(MainMode.PHONE)
+        idleMs = intent?.getLongExtra(EXTRA_IDLE_MS, 0L) ?: 0L
         val n = notification(when {
             interp -> "Jarvis interpreter is listening"
+            hf && profile == MainMode.GROQ -> "Jarvis Groq voice mode is listening"
             hf -> "Jarvis hands-free is listening"
             else -> "Jarvis Live is listening"
         })
@@ -184,8 +197,8 @@ class LiveService : Service() {
             return START_NOT_STICKY
         }
         if (engine == null) {
-            val e: Conversation = if (hf) HandsFreeEngine(applicationContext, null) { stopSelfNow() }
-                else LiveEngine(applicationContext, interp, { stopSelfNow() }) { msg -> switchToHandsFree(msg) }
+            val e: Conversation = if (hf) HandsFreeEngine(applicationContext, null, profile, idleMs) { stopSelfNow() }
+                else LiveEngine(applicationContext, interp, { stopSelfNow() }, idleOverrideMs = idleMs) { msg -> switchToHandsFree(msg) }
             engine = e
             LiveSession.engine = e
             LiveSession.handsFree.value = hf
@@ -203,12 +216,17 @@ class LiveService : Service() {
     private fun switchToHandsFree(message: String) {
         Store.runOnMain {
             if (engine == null) return@runOnMain
-            val e = HandsFreeEngine(applicationContext, message) { stopSelfNow() }
+            // v6: Settings → "When Live quota is spent" decides what carries on (STOP never gets here, see LiveEngine.allSpent).
+            val s = Settings(applicationContext)
+            val p = if (s.spentAction == SpentAction.GROQ && s.groqKey.isNotBlank()) MainMode.GROQ else MainMode.PHONE
+            profile = p
+            val e = HandsFreeEngine(applicationContext, message, p, idleMs) { stopSelfNow() }
             engine = e
             LiveSession.engine = e
             LiveSession.handsFree.value = true
             LiveSession.muted.value = false
-            runCatching { getSystemService(NotificationManager::class.java)?.notify(NOTIF_ID, notification("Jarvis hands-free is listening")) }
+            runCatching { getSystemService(NotificationManager::class.java)?.notify(NOTIF_ID,
+                notification(if (p == MainMode.GROQ) "Jarvis Groq voice mode is listening" else "Jarvis hands-free is listening")) }
             e.begin()
         }
     }
@@ -222,6 +240,7 @@ class LiveService : Service() {
         engine?.end(null)
         engine = null
         LiveSession.engine = null
+        PostCall.clear()
         LiveSession.running.value = false
         LiveSession.interpreterOn.value = false
         LiveSession.handsFree.value = false
@@ -233,7 +252,7 @@ class LiveService : Service() {
 
 /** One Live conversation: WebSocket + microphone + speaker. */
 class LiveEngine(private val ctx: Context, override val interpreter: Boolean, private val onEnded: () -> Unit,
-                 private val onHandOver: ((String) -> Unit)? = null) : Conversation {
+                 private val idleOverrideMs: Long = 0L, private val onHandOver: ((String) -> Unit)? = null) : Conversation {
     override val handsFree = false
     private val s = Settings(ctx)
     // v5: ordered rotation list; models out of quota today are left out (Settings → Live mode shows them).
@@ -278,7 +297,8 @@ class LiveEngine(private val ctx: Context, override val interpreter: Boolean, pr
     /** Every Live model is out of quota: the interpreter stops, a conversation carries on hands-free. */
     private fun allSpent() {
         val uk = ukrainian()
-        if (interpreter || onHandOver == null) {
+        // v6: Settings → "When Live quota is spent: Stop" (the interpreter always stops).
+        if (interpreter || onHandOver == null || s.spentAction == SpentAction.STOP) {
             end(if (uk) "Сер, безкоштовний ліміт Live на сьогодні вичерпано для всіх моделей. Він оновиться опівночі за тихоокеанським часом."
                 else "The free Live quota is spent for today on every model, sir. It resets at midnight Pacific time.")
             return
@@ -345,6 +365,8 @@ back, and do not end with offers of further help.
 Reply in the language the user speaks: if he speaks Ukrainian, you MUST respond unmistakably in Ukrainian; if English, in English.
 To act, call the provided functions (timers, reminders, tasks, memory, notes and lists, calendar, navigation${if (s.webSearch) ", web search" else ""}).
 Call a function only when the user asks for that action, then confirm briefly in one sentence using its result.
+When you start a background task with start_task and the user says he will give you the next one afterwards, or asks you
+to wait for his answer, set then_wait=true: when the task is finished you phone him and stay on the line to listen.
 ${Brain.abilityRules()}"""
     }
 
@@ -384,6 +406,7 @@ ${Brain.abilityRules()}"""
         everReady = true
         val newSession = !modelReady && handle == null
         modelReady = true
+        if (first) lastActivity = System.currentTimeMillis() // the silence timer starts when he can actually talk
         if (newSession) LiveUsage.session(s, model())
         LiveSession.status.value = "live · " + model()
         if (first) {
@@ -668,7 +691,7 @@ ${Brain.abilityRules()}"""
         var streaming = false
         var sentBytes = 0L
         var lastFlush = System.currentTimeMillis()
-        val idleMs = s.liveIdleMinutes * 60_000L
+        val idleMs = if (idleOverrideMs > 0) idleOverrideMs else s.liveIdleMinutes * 60_000L
         try {
             rec.startRecording()
             while (!ended && !Thread.currentThread().isInterrupted) {
@@ -721,6 +744,7 @@ ${Brain.abilityRules()}"""
                 // Battery and quota: end a forgotten session after N minutes with nothing said by either side.
                 if (now - lastActivity > idleMs) {
                     val m = s.liveIdleMinutes
+                    if (idleOverrideMs > 0) { Jarvis.scope.launch { end(null) }; break } // a session that continued a call: just hang up
                     Jarvis.scope.launch { end(if (ukrainian()) "Тиша вже $m хв, сер; вимикаю Live-режим." else "$m minutes of silence, sir; I've ended Live mode to save the quota.") }
                     break
                 }
@@ -826,7 +850,9 @@ object LiveTools {
         f.put(fn("cancel_timer", "Cancel timers or reminders whose name matches, or all.",
             mapOf("label" to str("Name of the timer/reminder, or 'all'")), listOf("label")))
         f.put(fn("start_task", "Start a long background job (research, writing, planning). Jarvis phones the user with the result.",
-            mapOf("prompt" to str("Complete, self-contained instruction"), "label" to str("Short name")), listOf("prompt")))
+            mapOf("prompt" to str("Complete, self-contained instruction"), "label" to str("Short name"),
+                "then_wait" to JSONObject().put("type", "BOOLEAN").put("description",
+                    "True when the user says he will give the next task afterwards or asks you to wait for his answer")), listOf("prompt")))
         f.put(fn("remember", "Store a lasting fact about the user (not passwords).", mapOf("text" to str("The fact")), listOf("text")))
         f.put(fn("forget", "Delete remembered facts containing these words.", mapOf("match" to str("Words identifying the memory")), listOf("match")))
         f.put(fn("note_add", "Save a note the user dictates.", mapOf("text" to str("The note")), listOf("text")))

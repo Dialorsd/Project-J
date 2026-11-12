@@ -21,12 +21,15 @@ class TaskService : Service() {
     companion object {
         private const val EXTRA_PROMPT = "prompt"
         private const val EXTRA_LABEL = "label"
+        private const val EXTRA_WAIT = "then_wait"
         private const val NOTIF_ID = 42
         val cancelled: MutableSet<Int> = Collections.synchronizedSet(HashSet())
 
-        fun start(ctx: Context, prompt: String, label: String) {
+        /** [thenWait]: after the user answers the "task finished" call, stay on the line and listen (v6). */
+        fun start(ctx: Context, prompt: String, label: String, thenWait: Boolean = false) {
             val i = Intent(ctx, TaskService::class.java)
                 .putExtra(EXTRA_PROMPT, prompt).putExtra(EXTRA_LABEL, label.ifBlank { "task" })
+                .putExtra(EXTRA_WAIT, thenWait)
             ContextCompat.startForegroundService(ctx, i)
         }
     }
@@ -51,6 +54,7 @@ class TaskService : Service() {
             // Could not go foreground (e.g. background start restrictions); still try to run the task.
         }
         val prompt = intent?.getStringExtra(EXTRA_PROMPT)
+        val wait = intent?.getBooleanExtra(EXTRA_WAIT, false) == true
         if (prompt.isNullOrBlank()) {
             if (running.get() == 0) stopSelf(startId)
             return START_NOT_STICKY
@@ -60,7 +64,7 @@ class TaskService : Service() {
         Store.putTimer(item)
         Thread {
             try {
-                runTask(item, prompt)
+                runTask(item, prompt, wait)
             } finally {
                 if (running.decrementAndGet() == 0) {
                     ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
@@ -71,14 +75,16 @@ class TaskService : Service() {
         return START_NOT_STICKY
     }
 
-    private fun runTask(item: TimerItem, prompt: String) {
+    private fun runTask(item: TimerItem, prompt: String, wait: Boolean) {
         val s = Settings(this)
         val uk = hasCyrillic(prompt)
+        var full = ""
         val line: String = try {
             val (summary, result, sources) = Brain.task(s, prompt)
             if (item.id in cancelled) return
             Store.addMessage("jarvis", (if (uk) "Результат завдання «${item.label}»:\n" else "Task result \"${item.label}\":\n") + result)
             Store.addSources(sources)
+            full = result
             EventLog.add(this, "task", "Task \"${item.label}\" finished: ${summary.take(150)}")
             summary
         } catch (e: Exception) {
@@ -89,7 +95,8 @@ class TaskService : Service() {
         } finally {
             Store.removeTimer(item.id)
         }
-        val call = CallInfo(item.id, "task", item.label, line)
+        // v6: the full result travels with the call, so a conversation after the call can work on it ("make it shorter").
+        val call = CallInfo(item.id, "task", item.label, line, detail = full.take(12_000), keep = if (wait) 1 else 0)
         Store.putCall(call)
         Caller.ring(this, call)
     }

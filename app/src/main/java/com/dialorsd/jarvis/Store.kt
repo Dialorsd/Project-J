@@ -23,7 +23,7 @@ data class TimerItem(val id: Int, val label: String, val endAt: Long, val kind: 
  * kind: "timer", "task", "pc", "morning" or "test". attempt counts re-rings (nagging), starting at 0.
  */
 data class CallInfo(val id: Int, val kind: String, val label: String, val line: String, val detail: String = "",
-                    val attempt: Int = 0)
+                    val attempt: Int = 0, val keep: Int = 0)
 
 /**
  * Tiny app-wide state + persistence (SharedPreferences JSON). Compose observes the state lists.
@@ -130,7 +130,7 @@ object Store {
     @Synchronized
     fun putCall(c: CallInfo) {
         val o = JSONObject(prefs.getString("calls", "{}") ?: "{}")
-        o.put(c.id.toString(), JSONObject().put("kind", c.kind).put("label", c.label).put("line", c.line).put("detail", c.detail).put("attempt", c.attempt))
+        o.put(c.id.toString(), JSONObject().put("kind", c.kind).put("label", c.label).put("line", c.line).put("detail", c.detail).put("attempt", c.attempt).put("keep", c.keep))
         prefs.edit().putString("calls", o.toString()).commit()
     }
 
@@ -138,7 +138,7 @@ object Store {
     fun getCall(id: Int): CallInfo? = runCatching {
         val o = JSONObject(prefs.getString("calls", "{}") ?: "{}").optJSONObject(id.toString()) ?: return null
         CallInfo(id, o.optString("kind", "timer"), o.optString("label"), o.optString("line"), o.optString("detail"),
-            o.optInt("attempt", 0))
+            o.optInt("attempt", 0), o.optInt("keep", 0))
     }.getOrNull()
 
     @Synchronized

@@ -282,7 +282,7 @@ private fun MainScreen(settings: Settings, resumeTick: Int, openSettings: () -> 
                 Button(onClick = { LiveSession.stop(ctx) }, colors = androidx.compose.material3.ButtonDefaults.buttonColors(
                     containerColor = Color(0xFFE5484D), contentColor = Color.White)) { Text("END") }
             } else {
-                OutlinedButton(onClick = { startLive() }) { Text(if (settings.handsFreeDefault) "HANDS-FREE CONVERSATION" else "LIVE CONVERSATION") }
+                OutlinedButton(onClick = { startLive() }) { Text(when (settings.mainMode) { MainMode.LIVE -> "LIVE CONVERSATION"; MainMode.GROQ -> "GROQ VOICE CONVERSATION"; MainMode.PHONE -> "HANDS-FREE CONVERSATION" }) }
                 Spacer(Modifier.width(8.dp))
                 TextButton(onClick = openInterp) { Text("INTERPRETER", color = Dim, fontFamily = FontFamily.Monospace, fontSize = 12.sp) }
             }

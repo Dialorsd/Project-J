@@ -26,7 +26,7 @@ class JarvisApp : Application() {
 
 /** Builds the chat context from device state. Blocking (calendar query): call off the main thread. */
 fun chatContext(ctx: Context, s: Settings): ChatContext =
-    ChatContext(Store.loadTimers(), runCatching { DeviceCalendar.upcoming(ctx) }.getOrNull(), s.webSearch)
+    ChatContext(Store.loadTimers(), runCatching { DeviceCalendar.upcoming(ctx) }.getOrNull(), s.webSearch, PostCall.block())
 
 /** Conversation flow: user text -> brain -> actions -> speech. Survives the activity being closed. */
 object Jarvis {
@@ -124,7 +124,8 @@ object Jarvis {
                     notes += if (uk) "Скасовано таймерів: $n" else "Cancelled $n timer(s)"
                 }
                 "task" -> if (a.prompt.isNotBlank()) {
-                    runCatching { TaskService.start(ctx, a.prompt, a.label) }
+                    val wait = a.raw.optBoolean("then_wait", false) || a.raw.optString("then_wait").equals("true", true)
+                    runCatching { TaskService.start(ctx, a.prompt, a.label, wait) }
                         .onSuccess { notes += if (uk) "Завдання «${a.label}» запущено" else "Task \"${a.label}\" started" }
                         .onFailure { fails += if (uk) "На жаль, не вдалося запустити завдання." else "I'm afraid the task could not be started." }
                 }

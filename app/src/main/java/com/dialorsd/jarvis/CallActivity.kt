@@ -1,10 +1,14 @@
 package com.dialorsd.jarvis
 
+import android.Manifest
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
 import android.view.WindowManager
 import androidx.activity.ComponentActivity
+import androidx.core.content.ContextCompat
+import androidx.lifecycle.Lifecycle
 import androidx.activity.compose.setContent
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.animateFloat
@@ -87,6 +91,13 @@ class CallActivity : ComponentActivity() {
             return
         }
         if (phase.value == Phase.CONNECTED && id == callId) return
+        if (phase.value == Phase.CONNECTED) {
+            // v6: another call came in while this one is connected (a second finished task...). A ring only keeps its
+            // notification; tapping Answer on it hangs up this one and takes the new one.
+            if (i?.action != Caller.ACTION_ANSWER) return
+            job?.cancel()
+            Voice.stop()
+        }
         callId = id
         label = call.label
         kind.value = call.kind
@@ -107,6 +118,14 @@ class CallActivity : ComponentActivity() {
             else -> Store.lastLanguageIsUkrainian()
         }
         job = Jarvis.scope.launch {
+            // v6: a session that is already running would hear Jarvis's voice: end it first (it resumes afterwards).
+            val s = Settings(applicationContext)
+            val wasActive = LiveSession.active
+            if (wasActive) {
+                LiveSession.stop(applicationContext)
+                var waited = 0
+                while (LiveSession.active && waited < 3000) { delay(100); waited += 100 }
+            }
             val line = if (call.kind == "morning") {
                 Store.setOrb(OrbState.THINKING)
                 caption.value = if (uk) "Готую ранковий огляд…" else "Preparing your briefing…"
@@ -138,13 +157,50 @@ class CallActivity : ComponentActivity() {
                     else if (call.kind == "watch") (if (uk) "Сер, спрацював спостерігач «${call.label}»: ${call.detail}" else "Sir, your watcher \"${call.label}\" has triggered: ${call.detail}")
                     else Brain.fallbackCallLine(call.label, uk)
             }
-            caption.value = line
-            Store.addMessage("jarvis", line)
-            Voice.speak(applicationContext, line)
+            // v6: "report back, then wait": a finished task ends with a question for what is next.
+            val keep = PostCall.shouldKeep(s, call, wasActive)
+            val spoken = if (keep && call.kind == "task" && !line.trimEnd().endsWith("?")) line.trimEnd() + " " + PostCall.nextPrompt(uk) else line
+            caption.value = spoken
+            Store.addMessage("jarvis", spoken)
+            Voice.speak(applicationContext, spoken) // finished before any microphone is opened: no overlap
+            if (keep && continueListening(s, call, spoken, uk)) {
+                phase.value = Phase.ENDED
+                finish()
+                return@launch
+            }
             delay(1500)
             phase.value = Phase.ENDED
             finish()
         }
+    }
+
+    /**
+     * v6: carries on into a voice session in this call (Gemini Live, or the Groq voice loop per Settings), seeded with
+     * what the call was about. Started from the visible call screen the user just answered (microphone foreground
+     * service rule). Returns when the session has ended; false if it could not start (then the call just ends).
+     */
+    private suspend fun continueListening(s: Settings, call: CallInfo, said: String, uk: Boolean): Boolean {
+        val app = applicationContext
+        if (ContextCompat.checkSelfPermission(app, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+            Store.addMessage("note", "I can't keep listening after the call: the microphone permission is missing.")
+            return false
+        }
+        if (!lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)) {
+            Store.addMessage("note", "I can't keep listening after the call while the screen is off; tap LIVE CONVERSATION to continue.")
+            return false
+        }
+        PostCall.seed = PostCall.Seed(call.kind, call.label, said, call.detail)
+        LiveSession.start(app, idleMs = s.postCallIdleSec * 1000L)
+        var waited = 0
+        while (!LiveSession.active && waited < 5000) { delay(100); waited += 100 }
+        if (!LiveSession.active) { PostCall.clear(); return false }
+        caption.value = if (uk) "Слухаю, сер…" else "Listening, sir…"
+        while (LiveSession.active && phase.value == Phase.CONNECTED) {
+            val st = LiveSession.status.value
+            caption.value = (if (uk) "Слухаю, сер. " else "Listening, sir. ") + st
+            delay(500)
+        }
+        return true
     }
 
     private fun decline() {
@@ -166,6 +222,7 @@ class CallActivity : ComponentActivity() {
     private fun hangUp() {
         job?.cancel()
         Voice.stop()
+        if (LiveSession.active) LiveSession.stop(applicationContext) // v6: also ends a session that continued the call
         Store.setOrb(OrbState.IDLE)
         finish()
     }

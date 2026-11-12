@@ -140,7 +140,20 @@ private fun SettingsMain(settings: Settings, resumeTick: Int, close: () -> Unit,
     var quotaSaver by remember { mutableStateOf(settings.liveQuotaSaver) }
     var gateSens by remember { mutableStateOf(settings.liveGateSensitivity) }
     var idleMin by remember { mutableStateOf(settings.liveIdleMinutes.toString()) }
-    var handsFreeDefault by remember { mutableStateOf(settings.handsFreeDefault) }
+    var mainMode by remember { mutableStateOf(settings.mainMode) }
+    var spentAction by remember { mutableStateOf(settings.spentAction) }
+    var hearing by remember { mutableStateOf(settings.hearing) }
+    var groqTtsOn by remember { mutableStateOf(settings.groqTtsOn) }
+    var groqTtsVoice by remember { mutableStateOf(settings.groqTtsVoice) }
+    var groqVoiceModel by remember { mutableStateOf(settings.groqVoiceModel) }
+    var groqSttModel by remember { mutableStateOf(settings.groqSttModel) }
+    var groqTtsModel by remember { mutableStateOf(settings.groqTtsModel) }
+    var hfBargeIn by remember { mutableStateOf(settings.hfBargeIn) }
+    var afterCall by remember { mutableStateOf(settings.afterCall) }
+    var postIdle by remember { mutableStateOf(settings.postCallIdleSec.toString()) }
+    var groqPreviewMsg by remember { mutableStateOf("") }
+    var groqPreviewing by remember { mutableStateOf(false) }
+    var groqTick by remember { mutableStateOf(0) }
     var preferGroq by remember { mutableStateOf(settings.handsFreePreferGroq) }
     var quietBeep by remember { mutableStateOf(settings.handsFreeQuietBeep) }
     var bargeIn by remember { mutableStateOf(settings.liveBargeIn) }
@@ -188,7 +201,12 @@ private fun SettingsMain(settings: Settings, resumeTick: Int, close: () -> Unit,
         if (newList.isNotEmpty()) settings.liveModels = newList
         settings.liveQuotaSaver = quotaSaver; settings.liveGateSensitivity = gateSens
         idleMin.toIntOrNull()?.let { settings.liveIdleMinutes = it }
-        settings.handsFreeDefault = handsFreeDefault; settings.handsFreePreferGroq = preferGroq
+        settings.mainMode = mainMode; settings.spentAction = spentAction; settings.hearing = hearing
+        settings.groqTtsOn = groqTtsOn; settings.groqTtsVoice = groqTtsVoice; settings.groqVoiceModel = groqVoiceModel
+        settings.groqSttModel = groqSttModel; settings.groqTtsModel = groqTtsModel; settings.hfBargeIn = hfBargeIn
+        settings.afterCall = afterCall
+        postIdle.toIntOrNull()?.let { settings.postCallIdleSec = it }
+        settings.handsFreePreferGroq = preferGroq
         settings.handsFreeQuietBeep = quietBeep
         settings.liveBargeIn = bargeIn; settings.liveGrounding = grounding
         settings.morningOn = morningOn; settings.morningDays = morningDays
@@ -238,7 +256,7 @@ private fun SettingsMain(settings: Settings, resumeTick: Int, close: () -> Unit,
         if (isOpen("KEYS")) {
             OutlinedTextField(gemini, { gemini = it }, Modifier.fillMaxWidth(), label = { Text("Gemini API key (required)") },
                 singleLine = true, visualTransformation = PasswordVisualTransformation())
-            OutlinedTextField(groq, { groq = it }, Modifier.fillMaxWidth(), label = { Text("Groq API key (optional backup)") },
+            OutlinedTextField(groq, { groq = it }, Modifier.fillMaxWidth(), label = { Text("Groq API key (free: Groq voice mode, backup brain, web search)") },
                 singleLine = true, visualTransformation = PasswordVisualTransformation())
         }
 
@@ -295,14 +313,18 @@ private fun SettingsMain(settings: Settings, resumeTick: Int, close: () -> Unit,
         if (isOpen("LIVE")) {
             Hint("A hands-free conversation: tap LIVE CONVERSATION on the main screen and just talk. It uses the microphone " +
                 "and internet only while it runs (a notification with End is shown) and ends itself after the silent minutes below.")
-            Text("The LIVE CONVERSATION button starts", color = Dim)
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                FilterChip(!handsFreeDefault, { handsFreeDefault = false }, label = { Text("Gemini Live") })
-                FilterChip(handsFreeDefault, { handsFreeDefault = true }, label = { Text("Hands-free") })
+            Text("The conversation button starts", color = Dim)
+            Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                MainMode.entries.forEach { m -> FilterChip(mainMode == m, { mainMode = m }, label = { Text(m.label) }) }
             }
-            Hint("Gemini Live: natural realtime voice, uses Google's free Live quota. Hands-free: the phone's speech recognition, " +
-                "the text brain and the normal voice in a loop; slower, but no Live quota. Jarvis switches to hands-free by himself " +
-                "when every Live model is out of quota.")
+            Hint("Gemini Live: natural realtime voice, uses Google's free Live quota. Groq voice mode (hands-free): Groq Whisper hears you, " +
+                "a fast Groq model thinks, Groq's English voice answers (Gemini and the phone voice are the backups); uses no Live quota, " +
+                "needs the Groq key. Phone hands-free: the phone's own speech recognition instead of Whisper.")
+            Text("When Gemini Live quota is spent", color = Dim)
+            Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                SpentAction.entries.forEach { a -> FilterChip(spentAction == a, { spentAction = a }, label = { Text(a.label) }) }
+            }
+            Hint("Chain: Gemini Live models in the list below, one after another, then this choice. Groq voice mode without a Groq key runs as phone hands-free.")
             SwitchRow("Save Live quota (send audio only when I speak)", "Off = always stream the microphone, as before. " +
                 "Turn off if Jarvis misses the start of what you say or does not hear you.", quotaSaver) { quotaSaver = it }
             if (quotaSaver) {
@@ -322,11 +344,64 @@ private fun SettingsMain(settings: Settings, resumeTick: Int, close: () -> Unit,
                 "until the daily reset at midnight Pacific time (${java.text.SimpleDateFormat("HH:mm", java.util.Locale.getDefault())
                     .format(java.util.Date(QuotaClock.nextPacificMidnight(System.currentTimeMillis())))} on this phone).")
             LiveStatusPanel(settings)
-            Text("Hands-free mode", color = Dim)
-            SwitchRow("Prefer Groq for hands-free", "Ask Groq first (free) and Gemini only if Groq fails, to save the Gemini quota. " +
+            Text("Phone hands-free", color = Dim)
+            SwitchRow("Prefer Groq for phone hands-free", "Ask Groq first (free) and Gemini only if Groq fails, to save the Gemini quota. " +
                 "Needs the Groq key.", preferGroq) { preferGroq = it }
-            SwitchRow("Silence the listening beep", "Mutes the phone's beep each time hands-free starts listening " +
+            SwitchRow("Silence the listening beep", "Mutes the phone's beep each time the phone recognizer starts listening " +
                 "(media and notification sound are muted for half a second).", quietBeep) { quietBeep = it }
+
+            Spacer(Modifier.height(6.dp))
+            Text("Groq voice mode (hands-free)", color = Cyan, fontSize = 13.sp)
+            Text("Hearing", color = Dim)
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Hearing.entries.forEach { h -> FilterChip(hearing == h, { hearing = h }, label = { Text(h.label) }) }
+            }
+            Hint("Groq Whisper understands English and Ukrainian and detects the language by itself. If Groq's limit is reached or it fails, " +
+                "the phone recognizer takes over automatically (and Whisper comes back when Groq's limit is over).")
+            SwitchRow("Speak with Groq's voice (English only)", "Ukrainian replies, long replies and any Groq failure use the Gemini voice, " +
+                "then the phone voice. Groq's free voice allows about 100 requests and a few thousand characters a day.", groqTtsOn) { groqTtsOn = it }
+            Text("Groq voice (male)", color = Dim)
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Defaults.GROQ_TTS_MALE_VOICES.forEach { v -> FilterChip(groqTtsVoice == v, { groqTtsVoice = v; groqPreviewMsg = "" }, label = { Text(v) }) }
+            }
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                Button(enabled = !groqPreviewing && groq.isNotBlank(), onClick = {
+                    save()
+                    groqPreviewing = true
+                    groqPreviewMsg = "Generating sample…"
+                    scope.launch {
+                        val err = Voice.previewGroq(ctx, groqTtsVoice)
+                        groqPreviewMsg = if (err == null) "Groq voice works." else "Groq voice FAILED: $err"
+                        groqPreviewing = false
+                        groqTick++
+                    }
+                }) { Text("PREVIEW") }
+                if (groqPreviewing) TextButton(onClick = { Voice.stop() }) { Text("STOP") }
+            }
+            if (groqPreviewMsg.isNotBlank()) Text(groqPreviewMsg, color = if (groqPreviewMsg.contains("FAILED")) Color(0xFFFFC48A) else Dim, fontSize = 12.sp)
+            key(groqTick) {
+                GroqApi.termsHint(settings)?.let { hint ->
+                    Text(hint, color = Color(0xFFFFC48A), fontSize = 12.sp)
+                    OutlinedButton(onClick = { open(ctx, Intent(Intent.ACTION_VIEW, Uri.parse(Defaults.GROQ_TERMS_URL))) }) { Text("OPEN GROQ CONSOLE") }
+                }
+            }
+            SwitchRow("Allow interrupting him", "Speak over Jarvis to stop him. Off by default here: the speaker is not echo-cancelled in this mode, " +
+                "so he may interrupt himself. When off, the microphone is ignored while he talks.", hfBargeIn) { hfBargeIn = it }
+            OutlinedTextField(groqVoiceModel, { groqVoiceModel = it }, Modifier.fillMaxWidth(), label = { Text("Groq model for conversation") }, singleLine = true)
+            OutlinedTextField(groqSttModel, { groqSttModel = it }, Modifier.fillMaxWidth(), label = { Text("Groq Whisper model") }, singleLine = true)
+            OutlinedTextField(groqTtsModel, { groqTtsModel = it }, Modifier.fillMaxWidth(), label = { Text("Groq voice model") }, singleLine = true)
+            GroqStatusPanel(settings)
+
+            Spacer(Modifier.height(6.dp))
+            Text("After a call", color = Cyan, fontSize = 13.sp)
+            Text("After a call, keep listening", color = Dim)
+            Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                AfterCall.entries.forEach { a -> FilterChip(afterCall == a, { afterCall = a }, label = { Text(a.label) }) }
+            }
+            NumberField(postIdle, { postIdle = it }, "End after this many silent seconds (10-300)", Modifier.fillMaxWidth())
+            Hint("When you answer a call from Jarvis (task finished, timer, PC message...) and he has said his piece, he stays on the line and " +
+                "listens, using the conversation mode chosen above. A task given with \"then I'll give you the next one\" always does this. " +
+                "End it with the END button on the call screen or in the notification.")
         }
 
         // ---------------------------------------------------------------- WEB SEARCH
@@ -549,6 +624,34 @@ private fun Diagnostics(settings: Settings, saveFirst: () -> Unit) {
             text
         }
     }
+    DiagRow("Groq text", saveFirst) {
+        val s = Settings(app)
+        if (s.groqKey.isBlank()) throw IllegalStateException("No Groq API key saved.")
+        withContext(Dispatchers.IO) {
+            val t0 = System.currentTimeMillis()
+            val r = GroqApi.chat(s, s.groqVoiceModel, "Reply with exactly: OK", listOf("user" to "ping")).trim().take(100)
+            "model ${s.groqVoiceModel}: \"$r\" in ${System.currentTimeMillis() - t0} ms"
+        }
+    }
+    DiagRow("Groq Whisper (speak for 3 s)", saveFirst) {
+        val s = Settings(app)
+        if (s.groqKey.isBlank()) throw IllegalStateException("No Groq API key saved.")
+        withContext(Dispatchers.IO) {
+            val rec = if (LiveSession.active) null else GroqDiag.record(app, 3)
+            val pcm = rec ?: GroqDiag.tone(2.0)
+            val t0 = System.currentTimeMillis()
+            val text = GroqApi.transcribe(s, Wav.encode(pcm, 16000), pcm.size / 32000.0)
+            "model ${s.groqSttModel} answered in ${System.currentTimeMillis() - t0} ms. Source: " +
+                (if (rec != null) "microphone" else "generated tone (the microphone was not used: " +
+                    (if (LiveSession.active) "a conversation is running" else "no permission or the microphone is busy") + ")") +
+                ". Heard: \"$text\""
+        }
+    }
+    DiagRow("Groq voice (Orpheus)", saveFirst) {
+        val s = Settings(app)
+        Voice.previewGroq(app, s.groqTtsVoice)?.let { throw IllegalStateException(it) }
+        "voice ${s.groqTtsVoice} (${s.groqTtsModel}) played"
+    }
     DiagRow("Web search", saveFirst) {
         withContext(Dispatchers.IO) {
             val r = Brain.lookup(Settings(app), "What is the capital of Ukraine?")
@@ -678,6 +781,41 @@ private fun LiveStatusPanel(settings: Settings) {
                 }
             }
             TextButton(onClick = { tick++ }) { Text("REFRESH", fontSize = 11.sp) }
+        }
+    }
+}
+
+/** v6: today's Groq counters and any limit Groq reported (COPY). */
+@Composable
+private fun GroqStatusPanel(settings: Settings) {
+    val ctx = LocalContext.current
+    var tick by remember { mutableStateOf(0) }
+    key(tick) {
+        val u = GroqUsage.today(settings)
+        val blocks = GroqLimits.active()
+        val usage = "Groq today (UTC day ${u.day}): ${u.stt} transcription(s), ${"%.0f".format(u.sttSec)} s of audio · ${u.chat} chat call(s) · " +
+            "${u.tts} voice call(s), ${u.ttsChars} characters"
+        Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(8.dp)).background(Panel).padding(8.dp)) {
+            Text(usage, color = Dim, fontSize = 12.sp)
+            Text("Free limits (Groq docs): Whisper 20 requests/min, 2,000/day, 7,200 s audio/hour, 28,800 s/day (each request counts at least 10 s); " +
+                "voice 10 requests/min, 100/day; ${Defaults.GROQ_VOICE_MODEL}: 30 requests/min, 1,000/day.", color = Dim, fontSize = 11.sp)
+            blocks.forEach { b ->
+                Text("Limit reached: ${b.kind} (${if (b.daily) "daily" else "per minute"}), about ${GroqLimits.minutesLeft(b)} min to go. ${b.why}",
+                    color = Color(0xFFFFC48A), fontSize = 12.sp)
+            }
+            if (u.err.isNotBlank()) {
+                val at = java.text.SimpleDateFormat("MM-dd HH:mm", java.util.Locale.getDefault()).format(java.util.Date(u.errAt))
+                Text("Last Groq error ($at): ${u.err}", color = Color(0xFFFFC48A), fontSize = 12.sp)
+            }
+            Row {
+                TextButton(onClick = { tick++ }) { Text("REFRESH", fontSize = 11.sp) }
+                TextButton(onClick = {
+                    ctx.getSystemService(ClipboardManager::class.java)?.setPrimaryClip(ClipData.newPlainText("Jarvis Groq",
+                        "Jarvis ${BuildConfigInfo.version(ctx)}\n$usage\n" + blocks.joinToString("\n") { "limit ${it.kind}: ${it.why}" } +
+                            (if (u.err.isNotBlank()) "\nlast error: ${u.err}" else "")))
+                }) { Text("COPY", fontSize = 11.sp) }
+                TextButton(onClick = { GroqLimits.clear(); tick++ }) { Text("RETRY NOW", fontSize = 11.sp) }
+            }
         }
     }
 }

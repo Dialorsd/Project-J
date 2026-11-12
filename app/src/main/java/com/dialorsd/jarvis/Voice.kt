@@ -9,6 +9,7 @@ import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
 import android.util.Base64
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
@@ -44,15 +45,27 @@ object Voice {
         runCatching { tts?.stop() }
     }
 
-    /** Speaks [text] and suspends until finished (or failed). Never throws. */
-    suspend fun speak(context: Context, text: String, allowGemini: Boolean = true) {
-        val clean = text.replace(Regex("[*_#`]"), "").trim()
+    /** v6: why Groq's voice was not used for the last speak() (quota, terms, error), or null if it was fine / not tried. */
+    @Volatile var lastGroqIssue: String? = null
+        private set
+
+    /**
+     * Speaks [text] and suspends until finished (or failed). Never throws.
+     * [groqFirst] (Groq voice mode): English text goes to Groq's Orpheus voice first, then Gemini, then the phone voice.
+     */
+    suspend fun speak(context: Context, text: String, allowGemini: Boolean = true, groqFirst: Boolean = false) {
+        var clean = text.replace(Regex("[*_#`]"), "").trim()
         if (clean.isEmpty()) return
         val s = Settings(context)
         if (s.voiceMode == VoiceMode.MUTED) return
         stopped = false
+        lastGroqIssue = null
         Store.setOrb(OrbState.SPEAKING)
         try {
+            if (groqFirst && s.groqTtsOn && s.groqKey.isNotBlank() && !hasCyrillic(clean)) {
+                clean = speakGroq(s, clean, s.groqTtsVoice)
+                if (clean.isEmpty() || stopped) return
+            }
             var done = false
             if (allowGemini && s.voiceMode == VoiceMode.GEMINI && !hasCyrillic(clean) && s.geminiKey.isNotBlank()) {
                 done = runCatching {
@@ -81,6 +94,67 @@ object Voice {
                 synth(s, voice, style, "Good evening, sir. Everything is in order, and the kettle is, I assure you, already on.")
             }
             if (withContext(Dispatchers.IO) { playPcm(pcm, rate) }) null else "Audio playback failed on this phone."
+        } catch (e: Exception) {
+            e.message ?: e.toString()
+        } finally {
+            Store.setOrb(OrbState.IDLE)
+        }
+    }
+
+    // ---------- Groq TTS (Orpheus, English only) ----------
+
+    /**
+     * Speaks as much of [text] as Groq's voice can. Returns the part that still has to be spoken by the next voice
+     * ("" = all done). Groq's request limit is 200 characters, so a reply is cut into sentences and fetched in parallel
+     * while the first one plays; replies needing more than 3 requests go to the next voice (free limit: 10 requests/min).
+     */
+    private suspend fun speakGroq(s: Settings, text: String, voice: String): String {
+        val chunks = TtsText.split(text)
+        if (chunks.isEmpty()) return ""
+        if (chunks.size > 3) return text
+        GroqLimits.check("tts")?.let { lastGroqIssue = "voice limit: $it"; return text }
+        var spoken = 0
+        try {
+            val jobs = kotlinx.coroutines.coroutineScope {
+                chunks.map { c -> async(Dispatchers.IO) { runCatching { GroqApi.tts(s, c, voice) } } }
+                    .map { it.await() }
+            }
+            for ((i, r) in jobs.withIndex()) {
+                if (stopped) return ""
+                val wav = r.getOrElse { e ->
+                    lastGroqIssue = (e as? BrainException)?.message ?: e.message ?: e.javaClass.simpleName
+                    return chunks.drop(spoken).joinToString(" ")
+                }
+                val audio = Wav.parse(wav) ?: run {
+                    lastGroqIssue = "Groq voice returned audio this phone cannot read"
+                    return chunks.drop(spoken).joinToString(" ")
+                }
+                if (!withContext(Dispatchers.IO) { playPcm(audio.pcm, audio.rate) } && !stopped) {
+                    lastGroqIssue = "Audio playback failed"
+                    return chunks.drop(spoken).joinToString(" ")
+                }
+                spoken = i + 1
+            }
+            return ""
+        } catch (e: Exception) {
+            lastGroqIssue = e.message ?: e.javaClass.simpleName
+            return chunks.drop(spoken).joinToString(" ")
+        }
+    }
+
+    /** Settings "Preview" for the Groq voice. Null on success, else the exact reason (the phone voice is NOT used). */
+    suspend fun previewGroq(context: Context, voice: String): String? {
+        val s = Settings(context)
+        if (s.groqKey.isBlank()) return "No Groq API key saved."
+        stop()
+        stopped = false
+        Store.setOrb(OrbState.SPEAKING)
+        return try {
+            val wav = withContext(Dispatchers.IO) { GroqApi.tts(s, "Good evening, sir. Everything is in order.", voice) }
+            val a = Wav.parse(wav) ?: return "Groq returned audio in a format this phone cannot read (${wav.size} bytes)."
+            if (withContext(Dispatchers.IO) { playPcm(a.pcm, a.rate) }) null else "Audio playback failed on this phone."
+        } catch (e: BrainException) {
+            GroqApi.termsHint(s) ?: "${e.kind}: ${e.message}"
         } catch (e: Exception) {
             e.message ?: e.toString()
         } finally {

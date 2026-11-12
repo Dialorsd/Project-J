@@ -25,7 +25,7 @@ enum class Failure { NO_KEY, BAD_KEY, QUOTA, NETWORK, SERVER, MODEL, OTHER }
 class BrainException(val kind: Failure, message: String) : Exception(message)
 
 /** Extra context for the chat prompt (filled by the caller from device state). */
-data class ChatContext(val timers: List<TimerItem>, val calendar: String?, val webSearch: Boolean)
+data class ChatContext(val timers: List<TimerItem>, val calendar: String?, val webSearch: Boolean, val extra: String = "")
 
 /** The "brain": Gemini generateContent over HTTPS, with Groq as an optional backup. Blocking: call off the main thread. */
 object Brain {
@@ -40,10 +40,10 @@ object Brain {
      * its result text (blocking); when the first reply contains info actions the model answers again with the results.
      */
     fun chat(s: Settings, history: List<Msg>, userText: String, ctx: ChatContext, image: ByteArray? = null,
-             preferGroq: Boolean = false, info: ((Action) -> String?)? = null): Reply {
+             preferGroq: Boolean = false, groqModels: List<String>? = null, info: ((Action) -> String?)? = null): Reply {
         val turns = history.filter { it.role == "user" || it.role == "jarvis" }.takeLast(Defaults.HISTORY_TURNS * 2)
             .map { (if (it.role == "user") "user" else "model") to it.text } + ("user" to userText)
-        val first = parseReply(generate(s, chatPrompt(s, ctx, allowSearch = ctx.webSearch), turns, json = true, image = image, preferGroq = preferGroq))
+        val first = parseReply(generate(s, chatPrompt(s, ctx, allowSearch = ctx.webSearch), turns, json = true, image = image, preferGroq = preferGroq, groqModels = groqModels))
         val search = first.actions.firstOrNull { it.type == "search" && it.str("query").isNotBlank() }
         val infos = first.actions.filter { it.type in INFO_TYPES }
         if ((search == null || !ctx.webSearch) && infos.isNotEmpty() && info != null) {
@@ -51,7 +51,7 @@ object Brain {
             val results = infos.joinToString("\n\n") { a -> "[${a.type} result]\n" + (runCatching { info(a) }.getOrElse { "error: ${it.message}" } ?: "done") }
             val turns2 = turns + ("model" to first.say.ifBlank { "(checking)" }) +
                 ("user" to "$results\n[End of results. Now answer my previous message using them. Do not repeat these lookup actions.]")
-            val second = parseReply(generate(s, chatPrompt(s, ctx, allowSearch = false), turns2, json = true, image = image, preferGroq = preferGroq))
+            val second = parseReply(generate(s, chatPrompt(s, ctx, allowSearch = false), turns2, json = true, image = image, preferGroq = preferGroq, groqModels = groqModels))
             val keep = first.actions.filter { it.type !in INFO_TYPES && it.type != "search" }
             val extra = second.actions.filter { it.type !in INFO_TYPES && it.type != "search" && keep.none { k -> k.raw.toString() == it.raw.toString() } }
             return second.copy(actions = keep + extra)
@@ -64,7 +64,7 @@ object Brain {
         val found = try { lookup(s, q) } catch (e: BrainException) { Lookup("(web search failed: ${e.message})", emptyList()) }
         val turns2 = turns + ("model" to first.say.ifBlank { "(searching the web)" }) +
             ("user" to "[Web search results for \"$q\"]\n${found.text}\n[End of results. Now answer my previous message using them. Mention that you looked it up only if useful.]")
-        val second = parseReply(generate(s, chatPrompt(s, ctx, allowSearch = false), turns2, json = true, image = image, preferGroq = preferGroq))
+        val second = parseReply(generate(s, chatPrompt(s, ctx, allowSearch = false), turns2, json = true, image = image, preferGroq = preferGroq, groqModels = groqModels))
         return second.copy(actions = second.actions.filter { it.type != "search" && it.type !in INFO_TYPES }, sources = found.sources)
     }
 
@@ -170,7 +170,8 @@ Your replies are spoken aloud, so keep them short and natural: usually 1-3 sente
             else -> "Calendar events for the next 7 days:\n${c.calendar}"
         }
         val notes = Notes.forPrompt().ifBlank { "Notes and lists: none." }
-        return "Current local time: $now. Active timers, reminders and tasks: $active.\n$cal\n$notes"
+        return "Current local time: $now. Active timers, reminders and tasks: $active.\n$cal\n$notes" +
+            (if (c.extra.isNotBlank()) "\n" + c.extra else "")
     }
 
     private fun notifRules(): String = if (BuildConfig.NOTIF_READER)
@@ -213,7 +214,9 @@ You can act ONLY through these actions:
 - {"type":"cancel_timer","label":"name of the timer or reminder, or all"}
 - {"type":"task","prompt":"a complete, self-contained instruction","label":"short name"}: for anything that needs
   long thinking, research or writing. You will do it in the background${if (s.webSearch) " (with web search)" else ""} and phone the
-  user with the result. In "say", briefly confirm you are on it.$search
+  user with the result. In "say", briefly confirm you are on it. Add "then_wait":true when the user says he will give
+  you the next task afterwards or wants you to wait for his answer ("tell me when done, then I'll give you the next one",
+  "wait for my reply", "потім дам наступне"): after the call you then stay on the line and listen.$search
 - {"type":"remember","text":"a fact about the user worth keeping"}: when the user tells you something to remember,
   or a lasting preference/fact (names, birthdays, preferences). Do not store secrets such as passwords.
 - {"type":"forget","match":"words identifying the memory"}
@@ -299,13 +302,17 @@ At most about 8 short sentences, no lists or markdown. Output ONLY a JSON object
 
     /** turns: list of (role "user"/"model", text). Returns raw model text. */
     fun generate(s: Settings, system: String, turns: List<Pair<String, String>>, json: Boolean, image: ByteArray? = null,
-                 preferGroq: Boolean = false): String {
+                 preferGroq: Boolean = false, groqModels: List<String>? = null): String {
         if (s.geminiKey.isBlank()) throw BrainException(Failure.NO_KEY, "No Gemini API key")
         // v5 hands-free: Groq first to save the Gemini quota; Gemini (then nothing else) if Groq fails.
         if (preferGroq && s.groqKey.isNotBlank() && image == null) {
-            try {
-                return groq(s.groqKey, s.groqModel, system, turns)
-            } catch (_: BrainException) {
+            // v6: the Groq voice loop passes its own fast model first; each model has its own free limits.
+            for (gm in (groqModels?.filter { it.isNotBlank() }?.distinct()?.ifEmpty { null } ?: listOf(s.groqModel))) {
+                try {
+                    return groq(s, gm, system, turns)
+                } catch (e: BrainException) {
+                    if (e.kind == Failure.BAD_KEY) break
+                }
             }
         }
         val models = listOf(s.model, s.fallbackModel).filter { it.isNotBlank() }.distinct()
@@ -322,7 +329,7 @@ At most about 8 short sentences, no lists or markdown. Output ONLY a JSON object
         val err = first ?: BrainException(Failure.OTHER, "No model configured")
         if (s.groqKey.isNotBlank() && image == null && err.kind in setOf(Failure.QUOTA, Failure.SERVER, Failure.MODEL)) {
             try {
-                return groq(s.groqKey, s.groqModel, system, turns)
+                return groq(s, s.groqModel, system, turns)
             } catch (_: BrainException) {
                 // Report the original Gemini problem; it is the one the user can act on.
             }
@@ -376,14 +383,8 @@ At most about 8 short sentences, no lists or markdown. Output ONLY a JSON object
         return sb.toString()
     }
 
-    private fun groq(key: String, model: String, system: String, turns: List<Pair<String, String>>): String {
-        val msgs = JSONArray().put(JSONObject().put("role", "system").put("content", system))
-        turns.forEach { (r, t) -> msgs.put(JSONObject().put("role", if (r == "model") "assistant" else "user").put("content", t)) }
-        val body = JSONObject().put("model", model).put("messages", msgs)
-        val resp = post(Defaults.GROQ_URL, body.toString(), mapOf("Authorization" to "Bearer $key"))
-        return JSONObject(resp).optJSONArray("choices")?.optJSONObject(0)?.optJSONObject("message")?.optString("content")
-            ?.takeIf { it.isNotBlank() } ?: throw BrainException(Failure.OTHER, "Empty answer from Groq")
-    }
+    private fun groq(s: Settings, model: String, system: String, turns: List<Pair<String, String>>): String =
+        GroqApi.chat(s, model, system, turns)
 
     /** POST JSON; maps HTTP/network errors to [BrainException]. Never logs headers or keys. */
     fun post(url: String, json: String, headers: Map<String, String>, readTimeoutMs: Int = 90_000): String {
