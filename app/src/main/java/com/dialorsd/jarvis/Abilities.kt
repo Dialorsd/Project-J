@@ -133,6 +133,28 @@ object DeviceCalendar {
         }
     }
 
+    data class Instance(val title: String, val begin: Long, val end: Long, val allDay: Boolean, val location: String)
+
+    /** Event instances overlapping [from, to) (epoch ms), sorted by start. Empty without permission. */
+    fun instances(ctx: Context, from: Long, to: Long, max: Int = 50): List<Instance> {
+        if (!canRead(ctx)) return emptyList()
+        val uri = CalendarContract.Instances.CONTENT_URI.buildUpon().also {
+            android.content.ContentUris.appendId(it, from)
+            android.content.ContentUris.appendId(it, to)
+        }.build()
+        val proj = arrayOf(CalendarContract.Instances.TITLE, CalendarContract.Instances.BEGIN, CalendarContract.Instances.END,
+            CalendarContract.Instances.ALL_DAY, CalendarContract.Instances.EVENT_LOCATION)
+        val out = mutableListOf<Instance>()
+        runCatching {
+            ctx.contentResolver.query(uri, proj, null, null, CalendarContract.Instances.BEGIN + " ASC")?.use { c ->
+                while (c.moveToNext() && out.size < max) {
+                    out += Instance(c.getString(0) ?: "(no title)", c.getLong(1), c.getLong(2), c.getInt(3) == 1, c.getString(4) ?: "")
+                }
+            }
+        }
+        return out
+    }
+
     /** Adds an event to the primary writable calendar. Returns a human-readable result; throws on failure. */
     fun add(ctx: Context, title: String, start: String, end: String, location: String): String {
         if (!canWrite(ctx)) throw IllegalStateException("no calendar permission")
@@ -153,7 +175,7 @@ object DeviceCalendar {
         return "${title.ifBlank { "Event" }}, ${f.format(s)}-${e.toLocalTime()}" + if (location.isNotBlank()) ", $location" else ""
     }
 
-    private fun parseLocal(s: String): LocalDateTime? {
+    fun parseLocal(s: String): LocalDateTime? {
         val t = s.trim().removeSuffix("Z").let { if (it.length > 19 && (it[19] == '+' || it[19] == '-')) it.substring(0, 19) else it }
         if (t.isEmpty()) return null
         return runCatching { LocalDateTime.parse(t) }.getOrNull()

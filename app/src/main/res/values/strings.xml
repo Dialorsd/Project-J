@@ -1,4 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">Jarvis</string>
+    <string name="widget_talk">TALK</string>
+    <string name="widget_live">LIVE</string>
+    <string name="widget_no_timers">No timers</string>
+    <string name="widget_description">Talk to Jarvis or start a Live conversation</string>
+    <string name="tile_live">Jarvis Live</string>
 </resources>

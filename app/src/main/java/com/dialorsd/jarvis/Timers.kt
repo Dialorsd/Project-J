@@ -25,6 +25,34 @@ object Timers {
         return t
     }
 
+    /** A reminder at an absolute time (epoch ms); rings like a timer. */
+    fun addAt(ctx: Context, endAt: Long, label: String): TimerItem {
+        val t = TimerItem(Store.nextId(), label.ifBlank { "Reminder" }.take(120), endAt.coerceAtMost(System.currentTimeMillis() + 366L * 86_400_000))
+        Store.putTimer(t)
+        schedule(ctx, t)
+        return t
+    }
+
+    /** Wakes the phone at [at] with [pi]: alarm-clock alarm if exact alarms are allowed, else best effort. */
+    fun wakeAt(ctx: Context, at: Long, pi: PendingIntent, alarmClock: Boolean = true) {
+        val am = ctx.getSystemService(AlarmManager::class.java) ?: return
+        try {
+            if (canExact(ctx)) {
+                if (alarmClock) {
+                    val show = PendingIntent.getActivity(ctx, 0, Intent(ctx, MainActivity::class.java),
+                        PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
+                    am.setAlarmClock(AlarmManager.AlarmClockInfo(at, show), pi)
+                } else {
+                    am.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, at, pi)
+                }
+            } else {
+                am.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, at, pi)
+            }
+        } catch (e: SecurityException) {
+            am.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, at, pi)
+        }
+    }
+
     private fun pending(ctx: Context, id: Int): PendingIntent =
         PendingIntent.getBroadcast(ctx, id, Intent(ctx, AlarmReceiver::class.java).putExtra(EXTRA_ID, id),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
@@ -101,7 +129,11 @@ class BootReceiver : BroadcastReceiver() {
             Intent.ACTION_MY_PACKAGE_REPLACED,
             AlarmManager.ACTION_SCHEDULE_EXACT_ALARM_PERMISSION_STATE_CHANGED -> Timers.rescheduleAll(context)
         }
-        if (intent.action != AlarmManager.ACTION_SCHEDULE_EXACT_ALARM_PERMISSION_STATE_CHANGED && Settings(context).pcLink) {
+        // v3: morning call and calendar heads-ups are alarms too; re-arm them (cheap, no network).
+        runCatching { Morning.schedule(context) }
+        runCatching { Proactive.scheduleEvents(context) }
+        runCatching { Proactive.scheduleBatteryCheck(context) }
+        if ((intent.action == Intent.ACTION_BOOT_COMPLETED || intent.action == Intent.ACTION_MY_PACKAGE_REPLACED) && Settings(context).pcLink) {
             PcLinkService.start(context)
         }
     }

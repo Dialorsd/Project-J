@@ -148,7 +148,7 @@ Output ONLY a JSON object: {"say": "..."}"""
 
     // ---------- prompts ----------
 
-    private fun character(s: Settings): String {
+    fun character(s: Settings): String {
         val h = s.humour
         val tone = when {
             h < 0.2f -> "Strictly professional and concise. No jokes."
@@ -163,47 +163,77 @@ Always reply in the language of the user's latest message (English or Ukrainian)
 Your replies are spoken aloud, so keep them short and natural: usually 1-3 sentences, no markdown, no emojis, no lists unless asked."""
     }
 
-    private fun memoryBlock(): String {
+    fun memoryBlock(): String {
         val m = Memories.forPrompt()
         return if (m.isBlank()) "" else "\n\nThings you remember about the user (most recent first):\n$m"
     }
 
-    private fun chatPrompt(s: Settings, c: ChatContext, allowSearch: Boolean): String {
+    /** Time, timers, calendar, notes and lists: shared by text chat and Live mode. */
+    fun contextBlock(c: ChatContext): String {
         val now = SimpleDateFormat("EEEE yyyy-MM-dd HH:mm", Locale.US).format(Date())
         val active = if (c.timers.isEmpty()) "none" else c.timers.joinToString("; ") {
             if (it.kind == "task") "task \"${it.label}\" (running)"
-            else "timer \"${it.label}\" (${((it.endAt - System.currentTimeMillis()) / 1000).coerceAtLeast(0)} s left)"
+            else "timer/reminder \"${it.label}\" (rings at ${SimpleDateFormat("EEE HH:mm", Locale.US).format(Date(it.endAt))}, " +
+                "${((it.endAt - System.currentTimeMillis()) / 1000).coerceAtLeast(0)} s left)"
         }
         val cal = when (c.calendar) {
             null -> "Calendar: not available (no permission). If asked, tell the user to allow calendar access in Settings."
             else -> "Calendar events for the next 7 days:\n${c.calendar}"
         }
+        val notes = Notes.forPrompt().ifBlank { "Notes and lists: none." }
+        return "Current local time: $now. Active timers, reminders and tasks: $active.\n$cal\n$notes"
+    }
+
+    /** Short description of every ability, for the prompt rules (text and Live). */
+    fun abilityRules(): String = """You cannot read messages or contacts or control other apps. Never say you have done something (set a timer or
+reminder, saved a memory or note, changed a list, added an event, started navigation) unless you perform the matching
+action in this same reply; the app confirms actions separately. Convert spoken durations to seconds exactly
+(e.g. "10 minutes" = 600). For "remind me at 17:00 to..." use a reminder with the exact local time. If a reminder
+or timer is not acknowledged, the app rings again a few times; you do not need to arrange that."""
+
+    private fun chatPrompt(s: Settings, c: ChatContext, allowSearch: Boolean): String {
         val search = if (allowSearch) """
 - {"type":"search","query":"..."}: look something up on the web (news, weather, prices, opening hours, recent
   facts, anything you are not sure is current). Use it alone, with "say" empty; you will get the results and answer then."""
         else ""
         return character(s) + memoryBlock() + """
 
-Current local time: $now. Active timers and tasks: $active.
-$cal
+${contextBlock(c)}
 
 You can act ONLY through these actions:
 - {"type":"timer","seconds":N,"label":"short name"}: set a countdown timer; when it ends you will phone the user.
-- {"type":"cancel_timer","label":"name of the timer, or all"}
+- {"type":"reminder","at":"YYYY-MM-DDTHH:MM","text":"what to remind about"}: phone the user at that local time.
+- {"type":"cancel_timer","label":"name of the timer or reminder, or all"}
 - {"type":"task","prompt":"a complete, self-contained instruction","label":"short name"}: for anything that needs
   long thinking, research or writing. You will do it in the background${if (s.webSearch) " (with web search)" else ""} and phone the
   user with the result. In "say", briefly confirm you are on it.$search
 - {"type":"remember","text":"a fact about the user worth keeping"}: when the user tells you something to remember,
   or a lasting preference/fact (names, birthdays, preferences). Do not store secrets such as passwords.
 - {"type":"forget","match":"words identifying the memory"}
+- {"type":"note_add","text":"..."}: save a note the user dictates ("note that...", "write down...").
+- {"type":"list_add","list":"shopping","item":"milk"}: add one item to a named list (one action per item).
+- {"type":"list_remove","list":"shopping","item":"milk"}: remove or tick off an item.
+- {"type":"list_clear","list":"shopping"}: empty a list.
 - {"type":"calendar_add","title":"...","start":"YYYY-MM-DDTHH:MM","end":"YYYY-MM-DDTHH:MM","location":"optional"}:
   add an event to the phone's calendar (local time; if no end is given use one hour).
 - {"type":"navigate","destination":"address or place name"}: start Google Maps navigation.
-You cannot read messages or contacts or control other apps. Never say you have done something (set a timer, saved
-a memory, added an event, started navigation) unless you include the matching action in this same reply; the app
-confirms actions separately. Convert spoken durations to seconds exactly (e.g. "10 minutes" = 600).
+${abilityRules()}
 
 Output ONLY a JSON object, nothing else: {"say": "what you say aloud", "actions": [ ... ]} ("actions" may be empty)."""
+    }
+
+    /** Spoken morning briefing from collected facts. Plain text, a few sentences. */
+    fun briefing(s: Settings, facts: String, ukrainian: Boolean): String {
+        val lang = if (ukrainian) "Ukrainian" else "English"
+        val sys = character(s) + memoryBlock() + """
+
+It is the morning and you are phoning the user with a short briefing. Facts gathered by the phone:
+$facts
+
+Write the briefing in $lang as you would say it on the phone: greet him, then the date, the weather, today's
+events, timers/reminders, messages from his computer and open notes or list items, skipping anything empty.
+At most about 8 short sentences, no lists or markdown. Output ONLY a JSON object: {"say": "..."}"""
+        return parseReply(generate(s, sys, listOf("user" to "(The user has just picked up the call.)"), json = true)).say
     }
 
     // ---------- parsing ----------
@@ -247,7 +277,7 @@ Output ONLY a JSON object, nothing else: {"say": "what you say aloud", "actions"
     // ---------- transport ----------
 
     /** turns: list of (role "user"/"model", text). Returns raw model text. */
-    private fun generate(s: Settings, system: String, turns: List<Pair<String, String>>, json: Boolean): String {
+    fun generate(s: Settings, system: String, turns: List<Pair<String, String>>, json: Boolean): String {
         if (s.geminiKey.isBlank()) throw BrainException(Failure.NO_KEY, "No Gemini API key")
         val models = listOf(s.model, s.fallbackModel).filter { it.isNotBlank() }.distinct()
         var first: BrainException? = null

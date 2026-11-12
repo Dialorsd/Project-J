@@ -15,7 +15,7 @@ android {
         minSdk = 26
         targetSdk = 36
         versionCode = runNumber
-        versionName = "2.0.$runNumber"
+        versionName = "3.0.$runNumber"
     }
 
     signingConfigs {
@@ -61,4 +61,6 @@ dependencies {
     implementation("androidx.activity:activity-compose:1.13.0")
     implementation("androidx.core:core-ktx:1.19.1")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.2")
+    // WebSocket client for the Gemini Live API (the only new dependency in v3).
+    implementation("com.squareup.okhttp3:okhttp:5.3.1")
 }

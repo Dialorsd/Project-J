@@ -56,6 +56,7 @@ class CallActivity : ComponentActivity() {
     private val caption = mutableStateOf("")
     private var callId = -1
     private var label = ""
+    private val kind = mutableStateOf("timer")
     private var job: Job? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -88,12 +89,9 @@ class CallActivity : ComponentActivity() {
         if (phase.value == Phase.CONNECTED && id == callId) return
         callId = id
         label = call.label
+        kind.value = call.kind
         phase.value = Phase.RINGING
-        caption.value = when (call.kind) {
-            "task" -> "Task finished: ${call.label}"
-            "pc" -> "PC: ${call.label}"
-            else -> "Timer: ${call.label}"
-        }
+        caption.value = Caller.describe(call)
         if (i?.action == Caller.ACTION_ANSWER) answer()
     }
 
@@ -105,14 +103,24 @@ class CallActivity : ComponentActivity() {
         val uk = when (call.kind) {
             "task" -> hasCyrillic(call.line)
             "pc" -> hasCyrillic(call.detail + call.label)
+            "timer" -> hasCyrillic(call.label) || Store.lastLanguageIsUkrainian()
             else -> Store.lastLanguageIsUkrainian()
         }
         job = Jarvis.scope.launch {
-            val line = call.line.ifBlank {
+            val line = if (call.kind == "morning") {
+                Store.setOrb(OrbState.THINKING)
+                caption.value = if (uk) "Готую ранковий огляд…" else "Preparing your briefing…"
+                val text = withContext(Dispatchers.IO) { Morning.briefingText(applicationContext, uk) }
+                Store.setOrb(OrbState.IDLE)
+                text
+            } else if (call.kind == "test") {
+                if (uk) "Тестовий дзвінок, сер. Якщо ви мене чуєте, дзвінки працюють." else "A test call, sir. If you can hear me, calls are working."
+            } else call.line.ifBlank {
                 Store.setOrb(OrbState.THINKING)
                 val situation = if (call.kind == "pc")
                     "the user's computer sent a message. Title: \"${call.label}\". Message: \"${call.detail}\". Relay it faithfully."
-                else "the timer \"${call.label}\" the user asked for has just finished."
+                else if (call.attempt > 0) "the user has not yet acknowledged the reminder/timer \"${call.label}\"; this is reminder call number ${call.attempt + 1}. Remind him firmly but politely."
+                else "the timer or reminder \"${call.label}\" the user asked for is due now."
                 val generated = withTimeoutOrNull(8000) {
                     withContext(Dispatchers.IO) { runCatching { Brain.callLine(Settings(this@CallActivity), situation, uk) }.getOrNull() }
                 }
@@ -131,9 +139,17 @@ class CallActivity : ComponentActivity() {
 
     private fun decline() {
         if (callId >= 0) {
-            Caller.stopRinging(this, callId)
-            declineCall(callId, Store.lastLanguageIsUkrainian())
+            val id = callId
+            val app = applicationContext
+            Caller.stopRinging(this, id)
+            Thread { declineCall(app, id) }.start()
         }
+        finish()
+    }
+
+    /** Reminder acknowledged without picking up: stops the nagging. */
+    private fun done() {
+        if (callId >= 0) Caller.markDone(this, callId)
         finish()
     }
 
@@ -168,6 +184,7 @@ class CallActivity : ComponentActivity() {
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
                     if (p == Phase.RINGING) {
                         RoundButton("DECLINE", Color(0xFFE5484D)) { decline() }
+                        if (kind.value == "timer") RoundButton("DONE", Color(0xFF3A6EA5)) { done() }
                         RoundButton("ANSWER", Color(0xFF2FBF71)) { answer() }
                     } else {
                         RoundButton("END", Color(0xFFE5484D)) { hangUp() }

@@ -30,6 +30,17 @@ object Defaults {
     const val GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
 
     const val HISTORY_TURNS = 12
+
+    // Gemini Live API (realtime voice). Both models are listed as free of charge on the free tier
+    // (ai.google.dev/gemini-api/docs/pricing, checked 2026-11-12). 3.8 Live is the current default;
+    // 3.1 Flash Live Preview is the documented "legacy preview" and is tried if the first is refused.
+    const val LIVE_MODEL = "gemini-3.8-live"
+    const val LIVE_FALLBACK_MODEL = "gemini-3.1-flash-live-preview"
+    const val LIVE_WS = "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent"
+
+    // Open-Meteo (free, no key, non-commercial use, CC BY 4.0 data).
+    const val GEOCODE_URL = "https://geocoding-api.open-meteo.com/v1/search"
+    const val FORECAST_URL = "https://api.open-meteo.com/v1/forecast"
 }
 
 enum class SpeechLang(val label: String) { AUTO("AUTO"), EN("EN"), UK("UK") }
@@ -100,6 +111,79 @@ class Settings(context: Context) {
     var ntfySeen: String
         get() = p.getString("ntfy_seen", "") ?: ""
         set(v) = p.edit().putString("ntfy_seen", v).apply()
+
+    // ---- v3: Live mode ----
+    var liveModel: String
+        get() = p.getString("live_model", null)?.takeIf { it.isNotBlank() } ?: Defaults.LIVE_MODEL
+        set(v) = p.edit().putString("live_model", v.trim()).apply()
+    var liveFallbackModel: String
+        get() = p.getString("live_fallback_model", null) ?: Defaults.LIVE_FALLBACK_MODEL
+        set(v) = p.edit().putString("live_fallback_model", v.trim()).apply()
+    /** Let him be interrupted while speaking (needs good echo cancellation on the loudspeaker). */
+    var liveBargeIn: Boolean
+        get() = p.getBoolean("live_barge_in", true)
+        set(v) = p.edit().putBoolean("live_barge_in", v).apply()
+    /** Google Search built into the Live model (otherwise the separate 2.5 Flash search helper is used). */
+    var liveGrounding: Boolean
+        get() = p.getBoolean("live_grounding", false)
+        set(v) = p.edit().putBoolean("live_grounding", v).apply()
+
+    // ---- v3: morning call ----
+    var morningOn: Boolean
+        get() = p.getBoolean("morning_on", false)
+        set(v) = p.edit().putBoolean("morning_on", v).apply()
+    /** Minutes after midnight. */
+    var morningTime: Int
+        get() = p.getInt("morning_time", 7 * 60 + 30)
+        set(v) = p.edit().putInt("morning_time", v.coerceIn(0, 24 * 60 - 1)).apply()
+    /** Bit 0 = Monday ... bit 6 = Sunday. Default Monday-Friday. */
+    var morningDays: Int
+        get() = p.getInt("morning_days", 0b0011111)
+        set(v) = p.edit().putInt("morning_days", v and 0x7F).apply()
+    var city: String
+        get() = p.getString("city", "") ?: ""
+        set(v) = p.edit().putString("city", v.trim()).apply()
+    /** "lat,lon,Resolved name" from the geocoder, or empty. */
+    var cityGeo: String
+        get() = p.getString("city_geo", "") ?: ""
+        set(v) = p.edit().putString("city_geo", v).apply()
+    var lastMorningAt: Long
+        get() = p.getLong("last_morning_at", 0L)
+        set(v) = p.edit().putLong("last_morning_at", v).apply()
+
+    // ---- v3: nagging reminders ----
+    var nagOn: Boolean
+        get() = p.getBoolean("nag_on", true)
+        set(v) = p.edit().putBoolean("nag_on", v).apply()
+    var nagMinutes: Int
+        get() = p.getInt("nag_minutes", 10)
+        set(v) = p.edit().putInt("nag_minutes", v.coerceIn(1, 120)).apply()
+    var nagTimes: Int
+        get() = p.getInt("nag_times", 3)
+        set(v) = p.edit().putInt("nag_times", v.coerceIn(1, 10)).apply()
+
+    // ---- v3: proactive remarks ----
+    var eventAlerts: Boolean
+        get() = p.getBoolean("event_alerts", true)
+        set(v) = p.edit().putBoolean("event_alerts", v).apply()
+    var eventMinutes: Int
+        get() = p.getInt("event_minutes", 15)
+        set(v) = p.edit().putInt("event_minutes", v.coerceIn(1, 180)).apply()
+    var eventSpeak: Boolean
+        get() = p.getBoolean("event_speak", false)
+        set(v) = p.edit().putBoolean("event_speak", v).apply()
+    var eventNotified: String
+        get() = p.getString("event_notified", "") ?: ""
+        set(v) = p.edit().putString("event_notified", v).apply()
+    var batteryAlerts: Boolean
+        get() = p.getBoolean("battery_alerts", false)
+        set(v) = p.edit().putBoolean("battery_alerts", v).apply()
+    var batteryLevel: Int
+        get() = p.getInt("battery_level", 15)
+        set(v) = p.edit().putInt("battery_level", v.coerceIn(5, 50)).apply()
+    var batteryWarned: Boolean
+        get() = p.getBoolean("battery_warned", false)
+        set(v) = p.edit().putBoolean("battery_warned", v).apply()
 
     var askedNotifications: Boolean
         get() = p.getBoolean("asked_notif", false)

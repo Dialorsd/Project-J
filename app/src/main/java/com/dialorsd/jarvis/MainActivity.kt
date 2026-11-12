@@ -75,23 +75,47 @@ import kotlinx.coroutines.delay
 import java.util.Locale
 
 class MainActivity : ComponentActivity() {
+    companion object {
+        /** From the widget / tile: open straight into push-to-talk or Live mode. */
+        const val ACTION_LISTEN = "com.dialorsd.jarvis.LISTEN"
+        const val ACTION_LIVE = "com.dialorsd.jarvis.START_LIVE"
+        /** One-shot request for the main screen; consumed when handled. */
+        val pendingAction = mutableStateOf<String?>(null)
+    }
+
     private val resumeTick = mutableIntStateOf(0)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         Voice.init(this)
+        if (savedInstanceState == null) takeAction(intent)
         setContent { JarvisTheme { Root(resumeTick.intValue) } }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        takeAction(intent)
+    }
+
+    private fun takeAction(i: Intent?) {
+        val a = i?.action
+        if (a == ACTION_LISTEN || a == ACTION_LIVE) pendingAction.value = a
     }
 
     override fun onResume() {
         super.onResume()
         Store.appVisible = true
         resumeTick.intValue++
+        HeadsetButton.refresh(this)
+        // Cheap re-arming of v3 alarms (calendar may have changed while we were away).
+        val app = applicationContext
+        Thread { runCatching { Proactive.scheduleEvents(app) }; runCatching { Morning.schedule(app) } }.start()
     }
 
     override fun onPause() {
         Store.appVisible = false
+        HeadsetButton.refresh(this)
         super.onPause()
     }
 }
@@ -103,10 +127,14 @@ private fun Root(resumeTick: Int) {
     val ctx = LocalContext.current
     val settings = remember { Settings(ctx) }
     var showSettings by remember { mutableStateOf(settings.geminiKey.isBlank()) }
+    var showNotes by remember { mutableStateOf(false) }
     Surface(Modifier.fillMaxSize(), color = Bg) {
         Box(Modifier.safeDrawingPadding()) {
-            if (showSettings) SettingsScreen(settings, resumeTick) { showSettings = false }
-            else MainScreen(settings, resumeTick) { showSettings = true }
+            when {
+                showSettings -> SettingsScreen(settings, resumeTick) { showSettings = false }
+                showNotes -> NotesScreen { showNotes = false }
+                else -> MainScreen(settings, resumeTick, { showSettings = true }, { showNotes = true })
+            }
         }
     }
 }
@@ -114,7 +142,7 @@ private fun Root(resumeTick: Int) {
 // ---------------------------------------------------------------- main screen
 
 @Composable
-private fun MainScreen(settings: Settings, resumeTick: Int, openSettings: () -> Unit) {
+private fun MainScreen(settings: Settings, resumeTick: Int, openSettings: () -> Unit, openNotes: () -> Unit) {
     val ctx = LocalContext.current
     val orb by Store.orb
     val partial by Store.partialSpeech
@@ -139,6 +167,37 @@ private fun MainScreen(settings: Settings, resumeTick: Int, openSettings: () -> 
         if (ok) ear.start(lang) else Store.addMessage("note", "Microphone permission denied: you can still type.")
     }
 
+    val liveMicLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { ok ->
+        if (ok) LiveSession.start(ctx) else Store.addMessage("note", "Live mode needs the microphone permission.")
+    }
+    fun hasMic() = ContextCompat.checkSelfPermission(ctx, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
+    fun startLive() { if (hasMic()) LiveSession.start(ctx) else liveMicLauncher.launch(Manifest.permission.RECORD_AUDIO) }
+    fun toggleListen() {
+        when {
+            Store.orb.value == OrbState.LISTENING -> ear.stop()
+            Store.orb.value == OrbState.SPEAKING -> Voice.stop()
+            hasMic() -> ear.start(lang)
+            else -> micLauncher.launch(Manifest.permission.RECORD_AUDIO)
+        }
+    }
+    // Headset button toggles listening while the app is open.
+    DisposableEffect(Unit) {
+        HeadsetButton.onPress = { toggleListen() }
+        onDispose { HeadsetButton.onPress = null }
+    }
+    // Widget / Quick Settings tile requests.
+    val pending by MainActivity.pendingAction
+    LaunchedEffect(pending) {
+        when (pending) {
+            MainActivity.ACTION_LISTEN -> if (!LiveSession.active) { if (hasMic()) ear.start(lang) else micLauncher.launch(Manifest.permission.RECORD_AUDIO) }
+            MainActivity.ACTION_LIVE -> if (!LiveSession.active) startLive()
+        }
+        if (pending != null) MainActivity.pendingAction.value = null
+    }
+    val liveOn by LiveSession.running
+    val liveStatus by LiveSession.status
+    val liveMuted by LiveSession.muted
+
     val calLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { }
     DisposableEffect(Unit) {
         Jarvis.requestCalendar = {
@@ -161,6 +220,7 @@ private fun MainScreen(settings: Settings, resumeTick: Int, openSettings: () -> 
                 lang = SpeechLang.entries[(lang.ordinal + 1) % SpeechLang.entries.size]
                 settings.speechLang = lang
             }, label = { Text(lang.label, fontFamily = FontFamily.Monospace) })
+            TextButton(onClick = openNotes) { Text("NOTES", color = Dim, fontFamily = FontFamily.Monospace) }
             TextButton(onClick = openSettings) { Text("SETTINGS", color = Dim, fontFamily = FontFamily.Monospace) }
         }
 
@@ -177,6 +237,20 @@ private fun MainScreen(settings: Settings, resumeTick: Int, openSettings: () -> 
             color = Dim, fontFamily = FontFamily.Monospace, fontSize = 11.sp, letterSpacing = 4.sp,
             modifier = Modifier.align(Alignment.CenterHorizontally)
         )
+
+        // Live mode controls
+        Row(Modifier.fillMaxWidth().padding(top = 6.dp), horizontalArrangement = Arrangement.Center,
+            verticalAlignment = Alignment.CenterVertically) {
+            if (liveOn) {
+                Text(if (liveMuted) "MIC MUTED" else liveStatus.uppercase(), color = Cyan, fontFamily = FontFamily.Monospace,
+                    fontSize = 11.sp, modifier = Modifier.weight(1f), maxLines = 1)
+                TextButton(onClick = { LiveSession.toggleMute() }) { Text(if (liveMuted) "UNMUTE" else "MUTE", color = Dim) }
+                Button(onClick = { LiveSession.stop(ctx) }, colors = androidx.compose.material3.ButtonDefaults.buttonColors(
+                    containerColor = Color(0xFFE5484D), contentColor = Color.White)) { Text("END") }
+            } else {
+                OutlinedButton(onClick = { startLive() }) { Text("LIVE CONVERSATION") }
+            }
+        }
 
         TimerList()
 
@@ -202,15 +276,7 @@ private fun MainScreen(settings: Settings, resumeTick: Int, openSettings: () -> 
                     Modifier.size(64.dp).clip(CircleShape)
                         .background(if (listening) Cyan else Panel)
                         .border(2.dp, Cyan, CircleShape)
-                        .clickable {
-                            when {
-                                listening -> ear.stop()
-                                orb == OrbState.SPEAKING -> Voice.stop()
-                                ContextCompat.checkSelfPermission(ctx, Manifest.permission.RECORD_AUDIO) ==
-                                    PackageManager.PERMISSION_GRANTED -> ear.start(lang)
-                                else -> micLauncher.launch(Manifest.permission.RECORD_AUDIO)
-                            }
-                        },
+                        .clickable { if (liveOn) LiveSession.toggleMute() else toggleListen() },
                     contentAlignment = Alignment.Center
                 ) { MicGlyph(if (listening) Color.Black else Cyan, Modifier.size(30.dp)) }
             }
