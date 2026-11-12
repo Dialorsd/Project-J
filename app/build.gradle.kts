@@ -18,6 +18,21 @@ android {
         versionName = "4.0.$runNumber"
     }
 
+    // Two editions with the SAME applicationId and signing key (install either over the other):
+    //  standard = no notification-listener service in the manifest (Google Play Protect blocks sideloading those)
+    //  full     = adds the notification-listener service (src/full/AndroidManifest.xml)
+    flavorDimensions += "edition"
+    productFlavors {
+        create("standard") {
+            dimension = "edition"
+            buildConfigField("boolean", "NOTIF_READER", "false")
+        }
+        create("full") {
+            dimension = "edition"
+            buildConfigField("boolean", "NOTIF_READER", "true")
+        }
+    }
+
     signingConfigs {
         // Fixed keystore committed to this private repo so every build can update the previous one.
         create("jarvis") {
@@ -45,6 +60,7 @@ android {
 
     buildFeatures {
         compose = true
+        buildConfig = true
     }
 
     lint {

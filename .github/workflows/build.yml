@@ -25,27 +25,47 @@ jobs:
 
       - uses: gradle/actions/setup-gradle@v6
 
-      - name: Build release APK
+      - name: Build release APKs (standard + full)
         run: |
           chmod +x gradlew
-          ./gradlew --no-daemon --stacktrace assembleRelease
+          ./gradlew --no-daemon --stacktrace assembleStandardRelease assembleFullRelease
 
-      - name: Collect APK
+      - name: Collect APKs
         run: |
-          cp app/build/outputs/apk/release/app-release.apk jarvis.apk
-          ls -l jarvis.apk
+          cp app/build/outputs/apk/standard/release/app-standard-release.apk jarvis.apk
+          cp app/build/outputs/apk/full/release/app-full-release.apk jarvis-full.apk
+          ls -l jarvis.apk jarvis-full.apk
+
+      - name: Check manifests for Play Protect blocked declarations
+        run: |
+          AAPT2=$(ls -d "$ANDROID_HOME"/build-tools/*/aapt2 | sort -V | tail -1)
+          echo "Using $AAPT2"
+          PATTERN='BIND_NOTIFICATION_LISTENER_SERVICE|BIND_ACCESSIBILITY_SERVICE|READ_SMS|RECEIVE_SMS|NotificationListenerService'
+          for apk in jarvis.apk jarvis-full.apk; do
+            echo "=== $apk ==="
+            "$AAPT2" dump packagename "$apk"
+            "$AAPT2" dump xmltree --file AndroidManifest.xml "$apk" > "manifest-$apk.txt"
+            echo "blocked-declaration matches:"
+            grep -E "$PATTERN" "manifest-$apk.txt" || echo "  (none)"
+          done
+          if grep -qE "$PATTERN" manifest-jarvis.apk.txt; then
+            echo "ERROR: standard APK still declares a Play Protect blocked permission/service"; exit 1
+          fi
+          grep -q BIND_NOTIFICATION_LISTENER_SERVICE manifest-jarvis-full.apk.txt || { echo "ERROR: full APK lost the listener"; exit 1; }
 
       - uses: actions/upload-artifact@v7
         with:
           name: jarvis-apk
-          path: jarvis.apk
+          path: |
+            jarvis.apk
+            jarvis-full.apk
 
       - name: Publish release "latest"
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release delete latest --yes --cleanup-tag || true
-          gh release create latest jarvis.apk \
+          gh release create latest jarvis.apk jarvis-full.apk \
             --target "$GITHUB_SHA" \
             --title "Jarvis (latest build #${GITHUB_RUN_NUMBER})" \
-            --notes "Automatic build ${GITHUB_RUN_NUMBER} from commit ${GITHUB_SHA}. Download jarvis.apk below on your phone and open it to install or update."
+            --notes "Automatic build ${GITHUB_RUN_NUMBER} from commit ${GITHUB_SHA}. Download jarvis.apk (standard, installs normally) on your phone and open it to install or update. jarvis-full.apk adds notification reading but Google Play Protect blocks it; see the README."

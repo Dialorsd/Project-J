@@ -688,9 +688,11 @@ object LiveTools {
         f.put(fn("navigate", "Start Google Maps navigation to a place.", mapOf("destination" to str("Address or place name")), listOf("destination")))
         // ---- v4 ----
         val int = { d: String -> JSONObject().put("type", "INTEGER").put("description", d) }
-        f.put(fn("notifications_read", "Read the user's recent phone notifications (only from apps he allowed). Use ONLY when he asks about his messages or notifications.",
-            mapOf("app" to str("Optional app name, e.g. Telegram or Gmail"), "since_minutes" to int("How far back, default 120"),
-                "limit" to int("Max items, default 10")), emptyList()))
+        if (BuildConfig.NOTIF_READER) {
+            f.put(fn("notifications_read", "Read the user's recent phone notifications (only from apps he allowed). Use ONLY when he asks about his messages or notifications.",
+                mapOf("app" to str("Optional app name, e.g. Telegram or Gmail"), "since_minutes" to int("How far back, default 120"),
+                    "limit" to int("Max items, default 10")), emptyList()))
+        }
         f.put(fn("watch_add", "Watch a web page and phone the user when a condition is met. Checks every interval_minutes (min 15, default 30). " +
             "Number kinds only work on simple pages that show the number in their HTML.",
             mapOf("kind" to str("site_up, page_contains, page_not_contains, page_changed, price_below, number_below or number_above"),

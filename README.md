@@ -42,11 +42,32 @@ What he can do (version 3):
 
 1. On the phone, open https://github.com/Dialorsd/Project-J/releases/latest and tap **jarvis.apk**
    (direct link: https://github.com/Dialorsd/Project-J/releases/download/latest/jarvis.apk).
+   This is the **standard** build and the one to use. (There is also `jarvis-full.apk`, see "Two downloads" below.)
 2. When Android asks, allow your browser to **install unknown apps** (Settings → Apps → your browser →
    Install unknown apps → Allow). This is needed because the app is not from the Play Store.
 3. Open the downloaded file and tap **Install** (or **Update**). New builds install over the old one;
    your settings and chat are kept.
 4. If Play Protect warns about an unknown app, choose **Install anyway** (it is your own app).
+
+### Two downloads
+
+- **jarvis.apk (standard)**: everything except reading your notifications. Installs normally.
+- **jarvis-full.apk (full)**: the same plus notification reading ("any new messages?"). Same app id and same
+  signing key, so you can install either over the other and keep your settings and chat.
+
+Why two? The full build declares a *notification listener* service. Google Play Protect blocks sideloaded apps that
+declare certain sensitive permissions (notification listener, accessibility service, reading/receiving SMS) with
+"App blocked to protect your device", and offers only OK
+([Google's list](https://developers.google.com/android/play-protect/warning-dev-guidance)). The standard build has none of them.
+
+To install the full build anyway:
+
+1. Play Store → your profile picture → **Play Protect** → settings gear → turn off **Scan apps with Play Protect**.
+2. Open `jarvis-full.apk` and install it.
+3. Turn **Scan apps with Play Protect** back on.
+
+Play Protect may flag the app again on a later scan or when you update it, so repeat the steps if that happens.
+Alternative: from a PC with USB debugging, run `adb install -r jarvis-full.apk` (this bypasses the on-device block).
 
 ## Add your key
 

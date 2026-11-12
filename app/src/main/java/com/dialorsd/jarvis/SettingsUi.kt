@@ -290,7 +290,10 @@ private fun SettingsMain(settings: Settings, resumeTick: Int, close: () -> Unit,
 
         // ---------------------------------------------------------------- v4 NOTIFICATIONS
         SectionHeader("NOTIFICATIONS", isOpen("NOTIF")) { toggle("NOTIF") }
-        if (isOpen("NOTIF")) NotificationsSection(settings, resumeTick)
+        if (isOpen("NOTIF")) {
+            if (BuildConfig.NOTIF_READER) NotificationsSection(settings, resumeTick)
+            else Hint("Not included in this build because Google Play Protect blocks installing it. See the README for the full build.")
+        }
 
         // ---------------------------------------------------------------- v4 WATCHERS
         SectionHeader("WEB WATCHERS", isOpen("WATCH")) { toggle("WATCH") }

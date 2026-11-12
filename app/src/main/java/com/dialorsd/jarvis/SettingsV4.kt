@@ -219,10 +219,14 @@ fun BatterySection(resumeTick: Int) {
 fun DiagnosticsV4(saveFirst: () -> Unit) {
     val ctx = LocalContext.current
     val app = ctx.applicationContext
-    DiagRow("Notification access", saveFirst) {
-        val s = Settings(app)
-        if (!Notifs.hasAccess(app)) throw IllegalStateException("access is OFF (Settings → Notifications → OPEN ACCESS SETTINGS)")
-        "access ON, ${s.notifAllowed.size} app(s) allowed, ${Notifs.items.size} stored, ${Notifs.seenApps.size} app(s) seen"
+    if (BuildConfig.NOTIF_READER) {
+        DiagRow("Notification access", saveFirst) {
+            val s = Settings(app)
+            if (!Notifs.hasAccess(app)) throw IllegalStateException("access is OFF (Settings → Notifications → OPEN ACCESS SETTINGS)")
+            "access ON, ${s.notifAllowed.size} app(s) allowed, ${Notifs.items.size} stored, ${Notifs.seenApps.size} app(s) seen"
+        }
+    } else {
+        Hint("Notification access: not in this build")
     }
     DiagRow("Watcher check (example.com)", saveFirst) {
         withContext(Dispatchers.IO) {

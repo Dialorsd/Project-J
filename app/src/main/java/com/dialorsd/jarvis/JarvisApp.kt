@@ -175,7 +175,7 @@ object Jarvis {
 /** v4: info actions (results go back to the model). Shared by text mode (second pass) and Live tools. */
 object Info {
     suspend fun run(ctx: Context, a: Action, uk: Boolean): String? = when (a.type) {
-        "notifications_read" -> Notifs.read(ctx, a.str("app"), a.raw.optInt("since_minutes", 120).let { if (it <= 0) 120 else it },
+        "notifications_read" -> if (!BuildConfig.NOTIF_READER) "Notification reading is not available in this build." else Notifs.read(ctx, a.str("app"), a.raw.optInt("since_minutes", 120).let { if (it <= 0) 120 else it },
             a.raw.optInt("limit", 10).let { if (it <= 0) 10 else it })
         "watch_list" -> withContext(Dispatchers.IO) { Watchers.forPrompt(ctx) }
         "day_summary" -> withContext(Dispatchers.IO) { Wrap.facts(ctx) }
