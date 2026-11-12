@@ -188,6 +188,56 @@ class Settings(context: Context) {
     var askedNotifications: Boolean
         get() = p.getBoolean("asked_notif", false)
         set(v) = p.edit().putBoolean("asked_notif", v).apply()
+
+    // ---- v4: reading notifications (nothing is shared until the user ticks apps) ----
+    /** Comma-separated package names whose notification text Jarvis may keep and read on request. */
+    var notifAllowed: Set<String>
+        get() = (p.getString("notif_allowed", "") ?: "").split(',').filter { it.isNotBlank() }.toSet()
+        set(v) = p.edit().putString("notif_allowed", v.joinToString(",")).apply()
+    /** Say new notifications from allowed apps aloud while Live mode runs (off by default). */
+    var notifAnnounce: Boolean
+        get() = p.getBoolean("notif_announce", false)
+        set(v) = p.edit().putBoolean("notif_announce", v).apply()
+
+    // ---- v4: watchers ----
+    var watchWifiOnly: Boolean
+        get() = p.getBoolean("watch_wifi_only", false)
+        set(v) = p.edit().putBoolean("watch_wifi_only", v).apply()
+
+    // ---- v4: PC remote (phone -> PC commands, HMAC-signed) ----
+    /** Shared HMAC secret (base64url, 32 random bytes). Empty = not paired. */
+    var pcSecret: String
+        get() = p.getString("pc_secret", "") ?: ""
+        set(v) = p.edit().putString("pc_secret", v).apply()
+    /** Separate ntfy topic the PC listens on for commands. */
+    var pcCmdTopic: String
+        get() = p.getString("pc_cmd_topic", "") ?: ""
+        set(v) = p.edit().putString("pc_cmd_topic", v).apply()
+    /** Nonces of PC replies already handled (replay protection), comma-separated. */
+    var pcReplySeen: String
+        get() = p.getString("pc_reply_seen", "") ?: ""
+        set(v) = p.edit().putString("pc_reply_seen", v).apply()
+
+    // ---- v4: interpreter ----
+    var interpA: String
+        get() = p.getString("interp_a", "uk") ?: "uk"
+        set(v) = p.edit().putString("interp_a", v).apply()
+    var interpB: String
+        get() = p.getString("interp_b", "en") ?: "en"
+        set(v) = p.edit().putString("interp_b", v).apply()
+
+    // ---- v4: daily wrap-up ----
+    var wrapOn: Boolean
+        get() = p.getBoolean("wrap_on", false)
+        set(v) = p.edit().putBoolean("wrap_on", v).apply()
+    /** Minutes after midnight. */
+    var wrapTime: Int
+        get() = p.getInt("wrap_time", 21 * 60)
+        set(v) = p.edit().putInt("wrap_time", v.coerceIn(0, 24 * 60 - 1)).apply()
+    /** Ring (call) instead of only posting a notification. */
+    var wrapCall: Boolean
+        get() = p.getBoolean("wrap_call", false)
+        set(v) = p.edit().putBoolean("wrap_call", v).apply()
 }
 
 fun newTopic(): String {

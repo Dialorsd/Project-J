@@ -63,6 +63,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -101,6 +102,12 @@ class MainActivity : ComponentActivity() {
     private fun takeAction(i: Intent?) {
         val a = i?.action
         if (a == ACTION_LISTEN || a == ACTION_LIVE) pendingAction.value = a
+        // v4: "Share -> Jarvis" with a picture (screenshot, photo).
+        if (i != null && a == Intent.ACTION_SEND && i.type?.startsWith("image/") == true) {
+            val uri = androidx.core.content.IntentCompat.getParcelableExtra(i, Intent.EXTRA_STREAM, Uri::class.java) ?: return
+            val question = i.getStringExtra(Intent.EXTRA_TEXT)?.trim().orEmpty()
+            attachImage(this, uri, question)
+        }
     }
 
     override fun onResume() {
@@ -110,7 +117,7 @@ class MainActivity : ComponentActivity() {
         HeadsetButton.refresh(this)
         // Cheap re-arming of v3 alarms (calendar may have changed while we were away).
         val app = applicationContext
-        Thread { runCatching { Proactive.scheduleEvents(app) }; runCatching { Morning.schedule(app) } }.start()
+        Thread { runCatching { Proactive.scheduleEvents(app) }; runCatching { Morning.schedule(app) }; runCatching { Wrap.schedule(app) } }.start()
     }
 
     override fun onPause() {
@@ -122,18 +129,35 @@ class MainActivity : ComponentActivity() {
 
 // ---------------------------------------------------------------- root
 
+/** v4: decode a picture in the background and keep it for the next question. */
+fun attachImage(context: Context, uri: Uri, question: String = "") {
+    val app = context.applicationContext
+    Thread {
+        val r = runCatching { Vision.load(app, uri) }
+        android.os.Handler(android.os.Looper.getMainLooper()).post {
+            r.onSuccess {
+                Vision.pending.value = it
+                if (question.isNotBlank()) Jarvis.send(app, question)
+                else Store.addMessage("note", "Picture attached. Ask about it: type, or tap the mic. / Зображення додано: запитайте про нього.")
+            }.onFailure { Store.addMessage("note", "Could not read that picture: ${it.message}") }
+        }
+    }.start()
+}
+
 @Composable
 private fun Root(resumeTick: Int) {
     val ctx = LocalContext.current
     val settings = remember { Settings(ctx) }
     var showSettings by remember { mutableStateOf(settings.geminiKey.isBlank()) }
     var showNotes by remember { mutableStateOf(false) }
+    var showInterp by remember { mutableStateOf(false) }
     Surface(Modifier.fillMaxSize(), color = Bg) {
         Box(Modifier.safeDrawingPadding()) {
             when {
                 showSettings -> SettingsScreen(settings, resumeTick) { showSettings = false }
                 showNotes -> NotesScreen { showNotes = false }
-                else -> MainScreen(settings, resumeTick, { showSettings = true }, { showNotes = true })
+                showInterp -> InterpreterScreen(settings) { showInterp = false }
+                else -> MainScreen(settings, resumeTick, { showSettings = true }, { showNotes = true }, { showInterp = true })
             }
         }
     }
@@ -142,7 +166,7 @@ private fun Root(resumeTick: Int) {
 // ---------------------------------------------------------------- main screen
 
 @Composable
-private fun MainScreen(settings: Settings, resumeTick: Int, openSettings: () -> Unit, openNotes: () -> Unit) {
+private fun MainScreen(settings: Settings, resumeTick: Int, openSettings: () -> Unit, openNotes: () -> Unit, openInterp: () -> Unit) {
     val ctx = LocalContext.current
     val orb by Store.orb
     val partial by Store.partialSpeech
@@ -206,6 +230,16 @@ private fun MainScreen(settings: Settings, resumeTick: Int, openSettings: () -> 
         onDispose { Jarvis.requestCalendar = null }
     }
 
+    // v4: camera (system camera app writes into our cache through the FileProvider) and photo picker (no permission).
+    val cameraUri = remember { runCatching { Vision.cameraUri(ctx) }.getOrNull() }
+    val camera = rememberLauncherForActivityResult(ActivityResultContracts.TakePicture()) { ok ->
+        if (ok && cameraUri != null) attachImage(ctx, cameraUri)
+    }
+    val picker = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri ->
+        if (uri != null) attachImage(ctx, uri)
+    }
+    val pendingImage by Vision.pending
+
     LaunchedEffect(Store.messages.size) {
         if (Store.messages.isNotEmpty()) listState.animateScrollToItem(Store.messages.size - 1)
     }
@@ -249,26 +283,46 @@ private fun MainScreen(settings: Settings, resumeTick: Int, openSettings: () -> 
                     containerColor = Color(0xFFE5484D), contentColor = Color.White)) { Text("END") }
             } else {
                 OutlinedButton(onClick = { startLive() }) { Text("LIVE CONVERSATION") }
+                Spacer(Modifier.width(8.dp))
+                TextButton(onClick = openInterp) { Text("INTERPRETER", color = Dim, fontFamily = FontFamily.Monospace, fontSize = 12.sp) }
             }
         }
 
         TimerList()
+        WatcherList()
 
         LazyColumn(Modifier.weight(1f).fillMaxWidth(), state = listState, verticalArrangement = Arrangement.spacedBy(6.dp)) {
             items(Store.messages) { m -> Bubble(m) }
             if (partial.isNotBlank()) item { Bubble(Msg("user", "$partial…")) }
         }
 
+        // v4: picture row (camera / gallery / attached picture)
+        Row(Modifier.fillMaxWidth().padding(top = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+            TextButton(onClick = {
+                if (cameraUri == null) Store.addMessage("note", "Camera is not available.")
+                else runCatching { camera.launch(cameraUri) }.onFailure { Store.addMessage("note", "No camera app found.") }
+            }) { Text("CAMERA", color = Dim, fontFamily = FontFamily.Monospace, fontSize = 12.sp) }
+            TextButton(onClick = {
+                runCatching { picker.launch(androidx.activity.result.PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)) }
+                    .onFailure { Store.addMessage("note", "Could not open the photo picker: ${it.message}") }
+            }) { Text("GALLERY", color = Dim, fontFamily = FontFamily.Monospace, fontSize = 12.sp) }
+            Spacer(Modifier.weight(1f))
+            pendingImage?.let { p ->
+                Thumb(p.thumbPath, Modifier.size(44.dp))
+                TextButton(onClick = { Vision.pending.value = null }) { Text("REMOVE", color = Dim, fontSize = 11.sp) }
+            }
+        }
+
         // input row
         Row(Modifier.fillMaxWidth().padding(vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
             OutlinedTextField(
                 value = input, onValueChange = { input = it }, modifier = Modifier.weight(1f),
-                placeholder = { Text("Type to Jarvis…") }, maxLines = 4,
+                placeholder = { Text(if (pendingImage != null) "Ask about the picture…" else "Type to Jarvis…") }, maxLines = 4,
                 keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
                 keyboardActions = KeyboardActions(onSend = { Jarvis.send(ctx, input); input = "" }),
             )
             Spacer(Modifier.width(8.dp))
-            if (input.isNotBlank()) {
+            if (input.isNotBlank() || pendingImage != null) {
                 Button(onClick = { Jarvis.send(ctx, input); input = "" }) { Text("SEND") }
             } else {
                 val listening = orb == OrbState.LISTENING
@@ -287,6 +341,10 @@ private fun MainScreen(settings: Settings, resumeTick: Int, openSettings: () -> 
 @Composable
 private fun Bubble(m: Msg) {
     if (m.role == "sources") { SourcesBubble(m); return }
+    if (m.role == "image") {
+        Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.End) { Thumb(m.text, Modifier.size(140.dp)) }
+        return
+    }
     val (bg, fg, align) = when (m.role) {
         "user" -> Triple(Color(0xFF12303A), Color(0xFFE6F6FA), Alignment.End)
         "jarvis" -> Triple(Panel, Color(0xFFDCEBF0), Alignment.Start)
@@ -334,6 +392,39 @@ private fun TimerList() {
                 Spacer(Modifier.width(10.dp))
                 Text(t.label, color = Color(0xFFDCEBF0), maxLines = 1, modifier = Modifier.weight(1f))
                 TextButton(onClick = { Timers.cancel(ctx, t.id) }) { Text("CANCEL", color = Dim, fontSize = 12.sp) }
+            }
+        }
+    }
+}
+
+/** v4: picture thumbnail from a file in app storage. */
+@Composable
+fun Thumb(path: String, modifier: Modifier) {
+    val bmp = remember(path) { runCatching { android.graphics.BitmapFactory.decodeFile(path)?.asImageBitmap() }.getOrNull() }
+    if (bmp == null) { Text("(picture)", color = Dim, fontSize = 12.sp); return }
+    androidx.compose.foundation.Image(bmp, contentDescription = "picture", modifier = modifier.clip(RoundedCornerShape(8.dp)),
+        contentScale = androidx.compose.ui.layout.ContentScale.Crop)
+}
+
+/** v4: active watchers under the timers, with last check and a cancel button. */
+@Composable
+private fun WatcherList() {
+    val ctx = LocalContext.current
+    if (Watchers.items.isEmpty()) return
+    val f = remember { java.text.SimpleDateFormat("HH:mm", Locale.getDefault()) }
+    Column(Modifier.fillMaxWidth().padding(bottom = 6.dp)) {
+        Watchers.items.forEach { w ->
+            Row(
+                Modifier.fillMaxWidth().padding(vertical = 2.dp).clip(RoundedCornerShape(8.dp))
+                    .border(1.dp, Cyan.copy(alpha = 0.2f), RoundedCornerShape(8.dp)).padding(horizontal = 10.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(Modifier.weight(1f).padding(vertical = 4.dp)) {
+                    Text("WATCH · " + w.label, color = Color(0xFFDCEBF0), maxLines = 1, fontSize = 14.sp)
+                    Text("every ${w.intervalMin} min" + (if (w.lastCheck > 0) " · ${f.format(java.util.Date(w.lastCheck))}: ${w.lastResult}" else ""),
+                        color = Dim, fontSize = 11.sp, maxLines = 1)
+                }
+                TextButton(onClick = { Thread { Watchers.remove(ctx.applicationContext, w.id) }.start() }) { Text("CANCEL", color = Dim, fontSize = 12.sp) }
             }
         }
     }

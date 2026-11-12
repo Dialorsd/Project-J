@@ -152,7 +152,11 @@ class PcLinkService : Service() {
         s.ntfySeen = (seen + id).takeLast(50).joinToString(",")
         s.ntfySince = maxOf(s.ntfySince, o.optLong("time", 0L))
 
-        val message = o.optString("message").trim().take(1000)
+        // v4: signed replies from the PC remote helper are handled separately (never ring as a plain ping).
+        val rawMessage = o.optString("message").trim()
+        if (rawMessage.startsWith(PcRemote.PREFIX)) { runCatching { PcRemote.onIncoming(this, rawMessage) }; return }
+
+        val message = rawMessage.take(1000)
         val title = o.optString("title").trim().take(120)
         val tags = o.optJSONArray("tags")?.let { a -> (0 until a.length()).map { a.optString(it).lowercase() } } ?: emptyList()
         val priority = o.optInt("priority", 3)
@@ -160,6 +164,7 @@ class PcLinkService : Service() {
         val label = title.ifBlank { "PC" }
 
         Store.addMessage("note", "PC: " + (if (title.isNotBlank()) "$title: " else "") + message)
+        EventLog.add(this, "pc", "PC ping: " + (if (title.isNotBlank()) "$title: " else "") + message.take(200))
         if (quiet) {
             val n = NotificationCompat.Builder(this, CH_PC_INFO)
                 .setSmallIcon(R.drawable.ic_stat_jarvis)

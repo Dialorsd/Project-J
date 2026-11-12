@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<paths>
+    <!-- v4: photos taken with the camera button (overwritten each time) -->
+    <cache-path name="camera" path="camera/" />
+</paths>

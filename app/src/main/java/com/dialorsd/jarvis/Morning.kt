@@ -180,6 +180,25 @@ object Weather {
         return "$place: " + listOf(now, day).filter { it.isNotBlank() }.joinToString("; ")
     }
 
+    /** v4: one line about tomorrow's weather for the saved city, or null if no city is set. Throws on network errors. */
+    fun tomorrow(s: Settings): String? {
+        if (s.city.isBlank()) return null
+        var geo = s.cityGeo
+        if (geo.isBlank()) { geo = geocode(s.city); s.cityGeo = geo }
+        val parts = geo.split(',')
+        val url = Defaults.FORECAST_URL + "?latitude=${parts[0]}&longitude=${parts[1]}" +
+            "&daily=temperature_2m_max,temperature_2m_min,precipitation_probability_max,weather_code" +
+            "&timezone=auto&forecast_days=2"
+        val d = JSONObject(get(url)).optJSONObject("daily") ?: return null
+        val max = d.optJSONArray("temperature_2m_max")?.optDouble(1)
+        val min = d.optJSONArray("temperature_2m_min")?.optDouble(1)
+        val rain = d.optJSONArray("precipitation_probability_max")?.optInt(1, -1) ?: -1
+        val code = d.optJSONArray("weather_code")?.optInt(1, -1) ?: -1
+        val place = parts.drop(2).joinToString(",").ifBlank { s.city }
+        return "$place tomorrow: ${CODES[code] ?: "?"}, ${min?.let { Math.round(it) }}..${max?.let { Math.round(it) }}°C" +
+            (if (rain >= 0) ", chance of rain $rain%" else "")
+    }
+
     private fun get(url: String): String {
         val c = URL(url).openConnection() as HttpURLConnection
         try {

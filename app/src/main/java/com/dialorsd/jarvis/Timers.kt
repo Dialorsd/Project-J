@@ -115,6 +115,7 @@ class AlarmReceiver : BroadcastReceiver() {
         val t = Store.removeTimer(id) ?: return // already cancelled
         val uk = Store.lastLanguageIsUkrainian()
         Store.addMessage("note", if (uk) "Таймер «${t.label}» завершився." else "Timer \"${t.label}\" finished.")
+        EventLog.add(context, "timer", "Timer/reminder \"${t.label}\" rang")
         val call = CallInfo(id, "timer", t.label, "")
         Store.putCall(call)
         Caller.ring(context, call)
@@ -133,6 +134,7 @@ class BootReceiver : BroadcastReceiver() {
         runCatching { Morning.schedule(context) }
         runCatching { Proactive.scheduleEvents(context) }
         runCatching { Proactive.scheduleBatteryCheck(context) }
+        runCatching { Wrap.schedule(context) } // v4 (watchers are WorkManager jobs, which survive reboots by themselves)
         if ((intent.action == Intent.ACTION_BOOT_COMPLETED || intent.action == Intent.ACTION_MY_PACKAGE_REPLACED) && Settings(context).pcLink) {
             PcLinkService.start(context)
         }

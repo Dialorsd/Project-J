@@ -79,6 +79,7 @@ class TaskService : Service() {
             if (item.id in cancelled) return
             Store.addMessage("jarvis", (if (uk) "Результат завдання «${item.label}»:\n" else "Task result \"${item.label}\":\n") + result)
             Store.addSources(sources)
+            EventLog.add(this, "task", "Task \"${item.label}\" finished: ${summary.take(150)}")
             summary
         } catch (e: Exception) {
             if (item.id in cancelled) return

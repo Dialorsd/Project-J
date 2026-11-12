@@ -54,6 +54,9 @@ object Store {
 
     fun setOrb(s: OrbState) = onMain { orb.value = s }
 
+    /** v4: lets other state holders (watchers...) update Compose state on the main thread. */
+    fun runOnMain(block: () -> Unit) = onMain(block)
+
     // ---- transcript ----
     fun addMessage(role: String, text: String) = onMain {
         messages.add(Msg(role, text))

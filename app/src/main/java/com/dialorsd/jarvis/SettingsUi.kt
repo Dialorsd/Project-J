@@ -66,7 +66,7 @@ private val OTHER_VOICES = listOf(
 )
 
 @Composable
-private fun SectionHeader(title: String, open: Boolean, toggle: () -> Unit) {
+internal fun SectionHeader(title: String, open: Boolean, toggle: () -> Unit) {
     Spacer(Modifier.height(4.dp))
     HorizontalDivider(color = Cyan.copy(alpha = 0.25f))
     Row(Modifier.fillMaxWidth().clickable(onClick = toggle).padding(vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -76,10 +76,10 @@ private fun SectionHeader(title: String, open: Boolean, toggle: () -> Unit) {
 }
 
 @Composable
-private fun Hint(text: String) = Text(text, color = Dim, fontSize = 12.sp)
+internal fun Hint(text: String) = Text(text, color = Dim, fontSize = 12.sp)
 
 @Composable
-private fun SwitchRow(title: String, sub: String, checked: Boolean, onChange: (Boolean) -> Unit) {
+internal fun SwitchRow(title: String, sub: String, checked: Boolean, onChange: (Boolean) -> Unit) {
     Row(verticalAlignment = Alignment.CenterVertically) {
         Column(Modifier.weight(1f)) {
             Text(title, color = Color(0xFFDCEBF0))
@@ -90,7 +90,7 @@ private fun SwitchRow(title: String, sub: String, checked: Boolean, onChange: (B
 }
 
 @Composable
-private fun NumberField(value: String, onChange: (String) -> Unit, label: String, modifier: Modifier = Modifier) {
+internal fun NumberField(value: String, onChange: (String) -> Unit, label: String, modifier: Modifier = Modifier) {
     OutlinedTextField(value, { onChange(it.filter { c -> c.isDigit() }.take(3)) }, modifier, label = { Text(label) }, singleLine = true,
         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number))
 }
@@ -288,6 +288,14 @@ private fun SettingsMain(settings: Settings, resumeTick: Int, close: () -> Unit,
             SwitchRow("Web search", "Google Search through Gemini 2.5 Flash (free: about 500 searches a day).", webSearch) { webSearch = it }
         }
 
+        // ---------------------------------------------------------------- v4 NOTIFICATIONS
+        SectionHeader("NOTIFICATIONS", isOpen("NOTIF")) { toggle("NOTIF") }
+        if (isOpen("NOTIF")) NotificationsSection(settings, resumeTick)
+
+        // ---------------------------------------------------------------- v4 WATCHERS
+        SectionHeader("WEB WATCHERS", isOpen("WATCH")) { toggle("WATCH") }
+        if (isOpen("WATCH")) WatchersSection(settings)
+
         // ---------------------------------------------------------------- MEMORY
         SectionHeader("MEMORY", isOpen("MEMORY")) { toggle("MEMORY") }
         if (isOpen("MEMORY")) {
@@ -394,7 +402,16 @@ private fun SettingsMain(settings: Settings, resumeTick: Int, close: () -> Unit,
             }
             OutlinedTextField(server, { server = it }, Modifier.fillMaxWidth(), label = { Text("Server") }, singleLine = true)
             Hint("After changing the topic or server, tap Save and turn PC link off and on. Setup for the PC: see the pc folder on the GitHub page.")
+            PcRemoteSection(settings)
         }
+
+        // ---------------------------------------------------------------- v4 DAILY WRAP-UP
+        SectionHeader("DAILY WRAP-UP", isOpen("WRAP")) { toggle("WRAP") }
+        if (isOpen("WRAP")) WrapSection(settings)
+
+        // ---------------------------------------------------------------- v4 BATTERY
+        SectionHeader("BATTERY (SAMSUNG)", isOpen("BATT")) { toggle("BATT") }
+        if (isOpen("BATT")) BatterySection(resumeTick)
 
         // ---------------------------------------------------------------- DIAGNOSTICS
         SectionHeader("DIAGNOSTICS", isOpen("DIAG")) { toggle("DIAG") }
@@ -483,10 +500,11 @@ private fun Diagnostics(settings: Settings, saveFirst: () -> Unit) {
         }, 5000)
         "ringing in 5 seconds (lock the screen to test the lock-screen call)"
     }
+    DiagnosticsV4(saveFirst)
 }
 
 @Composable
-private fun DiagRow(label: String, saveFirst: () -> Unit, test: suspend () -> String) {
+internal fun DiagRow(label: String, saveFirst: () -> Unit, test: suspend () -> String) {
     val ctx = LocalContext.current
     val scope = rememberCoroutineScope()
     var result by remember { mutableStateOf("") }

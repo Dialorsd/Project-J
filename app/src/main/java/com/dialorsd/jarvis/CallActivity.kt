@@ -113,11 +113,19 @@ class CallActivity : ComponentActivity() {
                 val text = withContext(Dispatchers.IO) { Morning.briefingText(applicationContext, uk) }
                 Store.setOrb(OrbState.IDLE)
                 text
+            } else if (call.kind == "wrap") {
+                Store.setOrb(OrbState.THINKING)
+                caption.value = if (uk) "Готую підсумок дня…" else "Preparing your wrap-up…"
+                val text = withContext(Dispatchers.IO) { Wrap.summaryText(applicationContext, uk) }
+                Store.setOrb(OrbState.IDLE)
+                text
             } else if (call.kind == "test") {
                 if (uk) "Тестовий дзвінок, сер. Якщо ви мене чуєте, дзвінки працюють." else "A test call, sir. If you can hear me, calls are working."
             } else call.line.ifBlank {
                 Store.setOrb(OrbState.THINKING)
-                val situation = if (call.kind == "pc")
+                val situation = if (call.kind == "watch")
+                    "a web page watcher the user set up has just triggered. Watcher: \"${call.label}\". What happened: \"${call.detail}\". Tell him briefly (no need to read the full address)."
+                else if (call.kind == "pc")
                     "the user's computer sent a message. Title: \"${call.label}\". Message: \"${call.detail}\". Relay it faithfully."
                 else if (call.attempt > 0) "the user has not yet acknowledged the reminder/timer \"${call.label}\"; this is reminder call number ${call.attempt + 1}. Remind him firmly but politely."
                 else "the timer or reminder \"${call.label}\" the user asked for is due now."
@@ -126,7 +134,9 @@ class CallActivity : ComponentActivity() {
                 }
                 Store.setOrb(OrbState.IDLE)
                 generated?.takeIf { it.isNotBlank() }
-                    ?: if (call.kind == "pc") Brain.fallbackPcLine(call.label, call.detail, uk) else Brain.fallbackCallLine(call.label, uk)
+                    ?: if (call.kind == "pc") Brain.fallbackPcLine(call.label, call.detail, uk)
+                    else if (call.kind == "watch") (if (uk) "Сер, спрацював спостерігач «${call.label}»: ${call.detail}" else "Sir, your watcher \"${call.label}\" has triggered: ${call.detail}")
+                    else Brain.fallbackCallLine(call.label, uk)
             }
             caption.value = line
             Store.addMessage("jarvis", line)

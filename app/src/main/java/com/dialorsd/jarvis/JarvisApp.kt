@@ -6,6 +6,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
 
 class JarvisApp : Application() {
@@ -14,6 +15,8 @@ class JarvisApp : Application() {
         Store.init(this)
         Memories.load(this)
         Notes.load(this)
+        Notifs.load(this)
+        Watchers.load(this)
         Caller.createChannels(this)
         val s = Settings(this)
         if (s.pcLink) PcLinkService.start(this)
@@ -34,14 +37,20 @@ object Jarvis {
 
     fun send(context: Context, text: String) {
         val ctx = context.applicationContext
-        val clean = text.trim()
+        // v4: a picture waiting for a question goes with this message (to the text model, also during Live mode).
+        val img = Vision.pending.value
+        val clean = text.trim().ifEmpty { if (img != null) (if (Store.lastLanguageIsUkrainian()) "Що на цьому зображенні?" else "What is in this picture?") else "" }
         if (clean.isEmpty()) return
+        if (img != null) {
+            Vision.pending.value = null
+            Store.addMessage("image", img.thumbPath)
+        }
         // In Live mode, typed text goes into the running conversation.
-        if (LiveSession.active && LiveSession.sendText(clean)) {
+        if (img == null && LiveSession.active && LiveSession.sendText(clean)) {
             Store.addMessage("user", clean)
             return
         }
-        Voice.stop()
+        if (!LiveSession.active) Voice.stop()
         val history = Store.messages.toList()
         Store.addMessage("user", clean)
         Store.setOrb(OrbState.THINKING)
@@ -50,7 +59,7 @@ object Jarvis {
             val uk = hasCyrillic(clean)
             val reply = try {
                 withContext(Dispatchers.IO) {
-                    Brain.chat(s, history, clean, chatContext(ctx, s))
+                    Brain.chat(s, history, clean, chatContext(ctx, s), img?.jpeg) { a -> runBlocking { Info.run(ctx, a, uk) } }
                 }
             } catch (e: Exception) {
                 Reply(Brain.errorLine(e, uk), emptyList())
@@ -63,7 +72,8 @@ object Jarvis {
             if (notes.isNotBlank() && reply.say.isNotBlank()) Store.addMessage("note", notes)
             Store.setOrb(OrbState.IDLE)
             withContext(Dispatchers.IO) { runCatching { Proactive.scheduleEvents(ctx) } }
-            Voice.speak(ctx, say)
+            if (!LiveSession.active) Voice.speak(ctx, say) // during Live mode the answer is only written
+            else Store.setOrb(OrbState.LISTENING)
         }
     }
 
@@ -143,8 +153,33 @@ object Jarvis {
                     Navigator.navigate(ctx, it)
                     notes += if (uk) "Навігація: $it" else "Navigating to $it"
                 }
+                // ---- v4 ----
+                "watch_add" -> {
+                    val r = withContext(Dispatchers.IO) {
+                        Watchers.add(ctx, a.str("kind"), a.str("target"), a.str("condition"),
+                            a.raw.optDouble("threshold").takeIf { !it.isNaN() }, a.str("label"),
+                            a.raw.optInt("interval_minutes", 0).takeIf { it > 0 }, a.raw.optBoolean("repeat", false))
+                    }
+                    if (r.startsWith("Watcher \"")) notes += r else fails += r
+                }
+                "watch_remove" -> {
+                    val gone = withContext(Dispatchers.IO) { Watchers.removeByMatch(ctx, a.str("match").ifBlank { a.label }) }
+                    notes += if (uk) "Видалено спостерігачів: ${gone.size}" else "Removed ${gone.size} watcher(s)"
+                }
             }
         }
         return notes.joinToString(". ") to fails.joinToString(" ")
+    }
+}
+
+/** v4: info actions (results go back to the model). Shared by text mode (second pass) and Live tools. */
+object Info {
+    suspend fun run(ctx: Context, a: Action, uk: Boolean): String? = when (a.type) {
+        "notifications_read" -> Notifs.read(ctx, a.str("app"), a.raw.optInt("since_minutes", 120).let { if (it <= 0) 120 else it },
+            a.raw.optInt("limit", 10).let { if (it <= 0) 10 else it })
+        "watch_list" -> withContext(Dispatchers.IO) { Watchers.forPrompt(ctx) }
+        "day_summary" -> withContext(Dispatchers.IO) { Wrap.facts(ctx) }
+        "pc_command" -> PcRemote.command(ctx, a.str("cmd"), a.str("name"), a.str("arg"), a.raw.optBoolean("confirmed", false))
+        else -> null
     }
 }

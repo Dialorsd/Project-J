@@ -82,11 +82,20 @@ object LiveSession {
     @Volatile internal var engine: LiveEngine? = null
     val active: Boolean get() = engine != null
 
+    // ---- v4: interpreter mode (same Live connection, translate-only instruction, no tools) ----
+    /** True while the running session is the interpreter. */
+    val interpreter: Boolean get() = engine?.interpreter == true
+    val interpreterOn = mutableStateOf(false)
+    /** Last thing heard and its translation, shown large on the interpreter screen. */
+    val heard = mutableStateOf("")
+    val translated = mutableStateOf("")
+
     /** Must be called while an activity of ours is visible (microphone foreground-service rule). */
-    fun start(ctx: Context) {
+    fun start(ctx: Context, interpreter: Boolean = false) {
         if (active) return
         try {
-            ContextCompat.startForegroundService(ctx, Intent(ctx, LiveService::class.java))
+            ContextCompat.startForegroundService(ctx, Intent(ctx, LiveService::class.java)
+                .putExtra(LiveService.EXTRA_INTERPRETER, interpreter))
         } catch (e: Exception) {
             Store.addMessage("note", "Live mode could not start: ${e.javaClass.simpleName}: ${e.message}")
         }
@@ -100,6 +109,7 @@ object LiveSession {
 
     /** Something the phone wants Jarvis to say (calendar heads-up...). */
     fun announce(text: String) {
+        if (interpreter) return // would be translated aloud
         engine?.sendUserText("(Notice from the phone, not said by the user. Tell the user briefly, in character: $text)")
     }
 
@@ -114,6 +124,7 @@ object LiveSession {
 class LiveService : Service() {
     companion object {
         const val ACTION_STOP = "com.dialorsd.jarvis.LIVE_STOP"
+        const val EXTRA_INTERPRETER = "interpreter"
         const val CH_LIVE = "jarvis_live"
         private const val NOTIF_ID = 44
     }
@@ -138,7 +149,7 @@ class LiveService : Service() {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
         val n = NotificationCompat.Builder(this, CH_LIVE)
             .setSmallIcon(R.drawable.ic_stat_jarvis)
-            .setContentTitle("Jarvis Live is listening")
+            .setContentTitle(if (intent?.getBooleanExtra(EXTRA_INTERPRETER, false) == true) "Jarvis interpreter is listening" else "Jarvis Live is listening")
             .setContentText("Talk freely. Tap End to stop.")
             .setOngoing(true)
             .setContentIntent(open)
@@ -154,9 +165,12 @@ class LiveService : Service() {
             return START_NOT_STICKY
         }
         if (engine == null) {
-            val e = LiveEngine(applicationContext) { stopSelfNow() }
+            val interp = intent?.getBooleanExtra(EXTRA_INTERPRETER, false) == true
+            val e = LiveEngine(applicationContext, interp) { stopSelfNow() }
             engine = e
             LiveSession.engine = e
+            LiveSession.interpreterOn.value = interp
+            if (interp) { LiveSession.heard.value = ""; LiveSession.translated.value = "" }
             LiveSession.running.value = true
             LiveSession.muted.value = false
             HeadsetButton.refresh(this)
@@ -175,6 +189,7 @@ class LiveService : Service() {
         engine = null
         LiveSession.engine = null
         LiveSession.running.value = false
+        LiveSession.interpreterOn.value = false
         LiveSession.status.value = ""
         HeadsetButton.refresh(this)
         super.onDestroy()
@@ -182,7 +197,7 @@ class LiveService : Service() {
 }
 
 /** One Live conversation: WebSocket + microphone + speaker. */
-class LiveEngine(private val ctx: Context, private val onEnded: () -> Unit) {
+class LiveEngine(private val ctx: Context, val interpreter: Boolean, private val onEnded: () -> Unit) {
     private val s = Settings(ctx)
     private val models = listOf(s.liveModel, s.liveFallbackModel).map { it.trim().removePrefix("models/") }.filter { it.isNotBlank() }.distinct()
     private var modelIndex = 0
@@ -259,7 +274,8 @@ class LiveEngine(private val ctx: Context, private val onEnded: () -> Unit) {
             .put("model", "models/$model")
             .put("generationConfig", gen)
             .put("systemInstruction", JSONObject().put("parts", JSONArray().put(JSONObject().put("text", systemPrompt()))))
-            .put("tools", LiveTools.declarations(s))
+        if (!interpreter) setup.put("tools", LiveTools.declarations(s))
+        setup
             .put("inputAudioTranscription", JSONObject())
             .put("outputAudioTranscription", JSONObject())
             .put("contextWindowCompression", JSONObject().put("slidingWindow", JSONObject()))
@@ -268,6 +284,7 @@ class LiveEngine(private val ctx: Context, private val onEnded: () -> Unit) {
     }
 
     private fun systemPrompt(): String {
+        if (interpreter) return Interpreter.instruction(s)
         val c = runCatching { chatContext(ctx, s) }.getOrElse { ChatContext(Store.loadTimers(), null, s.webSearch) }
         return Brain.character(s) + Brain.memoryBlock() + "\n\n" + Brain.contextBlock(c) + """
 
@@ -304,7 +321,8 @@ ${Brain.abilityRules()}"""
         everReady = true
         LiveSession.status.value = "live · " + models[modelIndex.coerceAtMost(models.size - 1)]
         if (first) {
-            Store.addMessage("note", if (ukrainian()) "Live-режим увімкнено. Говоріть вільно." else "Live mode on. Speak freely.")
+            Store.addMessage("note", if (interpreter) "Interpreter on: ${Interpreter.name(s.interpA)} ⇄ ${Interpreter.name(s.interpB)}."
+                else if (ukrainian()) "Live-режим увімкнено. Говоріть вільно." else "Live mode on. Speak freely.")
             startAudio()
         }
         Store.setOrb(OrbState.LISTENING)
@@ -346,13 +364,13 @@ ${Brain.abilityRules()}"""
     @Synchronized private fun flushUser() {
         val t = userBuf.toString().trim()
         userBuf.setLength(0)
-        if (t.isNotEmpty()) Store.addMessage("user", t)
+        if (t.isNotEmpty()) { Store.addMessage("user", t); if (interpreter) LiveSession.heard.value = t }
     }
 
     @Synchronized private fun flushJarvis() {
         val t = jarvisBuf.toString().trim()
         jarvisBuf.setLength(0)
-        if (t.isNotEmpty()) Store.addMessage("jarvis", t)
+        if (t.isNotEmpty()) { Store.addMessage("jarvis", t); if (interpreter) LiveSession.translated.value = t }
     }
 
     @Synchronized private fun flushTranscripts() { flushUser(); flushJarvis() }
@@ -442,7 +460,7 @@ ${Brain.abilityRules()}"""
         ended = true
         flushTranscripts()
         if (message != null) Store.addMessage("jarvis", message)
-        Store.addMessage("note", if (ukrainian()) "Live-режим вимкнено." else "Live mode ended.")
+        Store.addMessage("note", if (interpreter) "Interpreter off." else if (ukrainian()) "Live-режим вимкнено." else "Live mode ended.")
         runCatching { ws?.close(1000, "bye") }
         ws = null
         recThread?.interrupt()
@@ -668,6 +686,29 @@ object LiveTools {
             mapOf("title" to str("Event title"), "start" to str("Local start YYYY-MM-DDTHH:MM"),
                 "end" to str("Local end YYYY-MM-DDTHH:MM (optional)"), "location" to str("Optional place")), listOf("title", "start")))
         f.put(fn("navigate", "Start Google Maps navigation to a place.", mapOf("destination" to str("Address or place name")), listOf("destination")))
+        // ---- v4 ----
+        val int = { d: String -> JSONObject().put("type", "INTEGER").put("description", d) }
+        f.put(fn("notifications_read", "Read the user's recent phone notifications (only from apps he allowed). Use ONLY when he asks about his messages or notifications.",
+            mapOf("app" to str("Optional app name, e.g. Telegram or Gmail"), "since_minutes" to int("How far back, default 120"),
+                "limit" to int("Max items, default 10")), emptyList()))
+        f.put(fn("watch_add", "Watch a web page and phone the user when a condition is met. Checks every interval_minutes (min 15, default 30). " +
+            "Number kinds only work on simple pages that show the number in their HTML.",
+            mapOf("kind" to str("site_up, page_contains, page_not_contains, page_changed, price_below, number_below or number_above"),
+                "target" to str("Web address"), "condition" to str("Phrase to find; 'down' for site_up to wait for it going down; for numbers an optional phrase the number follows"),
+                "threshold" to JSONObject().put("type", "NUMBER").put("description", "Number for price_below/number_below/number_above"),
+                "label" to str("Short name"), "interval_minutes" to int("Minutes between checks (15 or more)"),
+                "repeat" to JSONObject().put("type", "BOOLEAN").put("description", "Keep watching after it fires (default false)")),
+            listOf("kind", "target")))
+        f.put(fn("watch_list", "List the active web page watchers.", emptyMap(), emptyList()))
+        f.put(fn("watch_remove", "Remove watchers matching a label, address, #id, or all.", mapOf("match" to str("What to remove")), listOf("match")))
+        f.put(fn("pc_command", "Send a named command to the user's paired PC and get its reply. status = CPU, memory, disk, uptime, top programs " +
+            "(arg = a program name to check). watch_exit = phone him when program arg exits. shutdown_when_done = shut down after program arg exits. " +
+            "sleep/shutdown/restart/shutdown_when_done need confirmed=true, which you may only set after asking 'Shall I, sir?' and hearing a clear yes.",
+            mapOf("cmd" to str("status, lock, sleep, shutdown, restart, cancel_shutdown, shutdown_when_done, watch_exit or run"),
+                "name" to str("For run: the name of a command the user set up on the PC"), "arg" to str("Program/process name where needed"),
+                "confirmed" to JSONObject().put("type", "BOOLEAN").put("description", "True only after the user said yes")), listOf("cmd")))
+        f.put(fn("day_summary", "What happened today (timers, tasks, PC messages, watchers), what is still running, open items, tomorrow's events and weather.",
+            emptyMap(), emptyList()))
         if (s.webSearch && !s.liveGrounding) {
             f.put(fn("web_search", "Look up current information on the web (news, weather, prices, opening hours, recent facts).",
                 mapOf("query" to str("Search query")), listOf("query")))
@@ -691,6 +732,7 @@ object LiveTools {
         }
         val secs = args.optDouble("seconds", 0.0).let { if (it.isNaN()) 0L else it.toLong() }
         val a = Action(type, secs, args.optString("label"), args.optString("prompt"), args)
+        Info.run(ctx, a, uk)?.let { return it.take(4000) } // v4 lookups: the result goes straight back to the model
         val (notes, fails) = Jarvis.runActions(ctx, listOf(a), uk)
         if (notes.isNotBlank()) Store.addMessage("note", notes)
         return listOf(notes, fails).filter { it.isNotBlank() }.joinToString(" ").ifBlank { "done" }

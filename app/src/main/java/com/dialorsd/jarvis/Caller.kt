@@ -105,6 +105,8 @@ object Caller {
         "task" -> "Task finished: ${call.label}"
         "pc" -> "PC: ${call.label}"
         "morning" -> "Morning briefing"
+        "wrap" -> "Evening wrap-up"
+        "watch" -> "Watcher: ${call.label}"
         "test" -> "Test call"
         else -> (if (call.attempt > 0) "Reminder (again): " else "Timer finished: ") + call.label
     }
@@ -126,6 +128,7 @@ object Caller {
         stopRinging(ctx, callId)
         runCatching { ctx.getSystemService(android.app.AlarmManager::class.java)?.cancel(eventPi(ctx, c, ACTION_NAG, 5)) }
         Store.removeCall(callId)
+        EventLog.add(ctx, "done", "Marked done: ${c.label}")
         val uk = Store.lastLanguageIsUkrainian()
         Store.addMessage("note", if (uk) "Позначено як виконане: ${c.label}" else "Marked done: ${c.label}")
     }
@@ -149,6 +152,7 @@ object Caller {
         Store.removeCall(call.id)
         when (call.kind) {
             "morning" -> Morning.deliverAsNotification(ctx)
+            "wrap" -> Wrap.deliverAsNotification(ctx)
             else -> {
                 val isTask = call.kind == "task"
                 val what = if (declined) (if (uk) "Ви відхилили дзвінок" else "Call declined") else (if (uk) "Пропущений дзвінок" else "Missed call")
